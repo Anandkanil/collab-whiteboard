@@ -72,6 +72,8 @@ const auth = app ? getAuth(app) : null;
 const DEFAULT_STROKE = '#000000';
 const DEFAULT_STROKE_WIDTH = 2;
 const DEFAULT_BACKGROUND = '#ffffff';
+const MOBILE_BREAKPOINT = 768;
+const DESKTOP_PANEL_BREAKPOINT = 1024;
 
 const TOOL = {
   SELECT: 'select',
@@ -96,6 +98,41 @@ const BG_SWATCHES = [
   '#fecdd3',
   '#e9d5ff',
 ];
+
+const createCursor = (svg, x, y) =>
+  `url("data:image/svg+xml,${encodeURIComponent(svg)}") ${x} ${y}, auto`;
+
+const ERASER_CURSOR = createCursor(
+  '<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 28 28"><path d="M9 21 3.5 15.5a2.5 2.5 0 0 1 0-3.5L12 3.5a2.5 2.5 0 0 1 3.5 0l9 9a2.5 2.5 0 0 1 0 3.5L18.5 21H9Z" fill="%23f8fafc" stroke="%230f172a" stroke-width="1.5"/><path d="M11.5 21 20 12.5" stroke="%23ef4444" stroke-width="1.5" stroke-linecap="round"/><path d="M7.5 24.5h14" stroke="%2394a3b8" stroke-width="1.5" stroke-linecap="round"/></svg>',
+  6,
+  22,
+);
+
+const getDefaultToolbarPosition = (viewportWidth, viewportHeight, isMobile) => {
+  const estimatedToolbarWidth = Math.min(isMobile ? viewportWidth - 24 : 620, viewportWidth - 24);
+
+  return {
+    x: Math.max(12, Math.round((viewportWidth - estimatedToolbarWidth) / 2)),
+    y: isMobile ? Math.max(86, viewportHeight - 184) : 70,
+  };
+};
+
+const getCanvasCursor = (tool) => {
+  if (tool === TOOL.ERASER) return ERASER_CURSOR;
+  if (tool === TOOL.HAND) return 'grab';
+  return 'crosshair';
+};
+
+const getBoardSessionId = () => {
+  const key = 'cb-board-session-id';
+  const existing = window.sessionStorage.getItem(key);
+
+  if (existing) return existing;
+
+  const nextId = `session-${Math.random().toString(36).slice(2, 10)}-${Date.now().toString(36)}`;
+  window.sessionStorage.setItem(key, nextId);
+  return nextId;
+};
 
 const generateRoomId = () => Math.random().toString(36).slice(2, 9).toUpperCase();
 
@@ -131,6 +168,7 @@ const toolButtonClass = (active) =>
   }`;
 
 function App() {
+  const sessionIdRef = useRef(getBoardSessionId());
   const [user, setUser] = useState(null);
   const [view, setView] = useState('landing');
   const [roomId, setRoomId] = useState('');
@@ -192,6 +230,7 @@ function App() {
     await setDoc(roomRef, {
       roomId: newRoom,
       hostId: user.uid,
+      hostSessionId: sessionIdRef.current,
       hostName: username.trim(),
       createdAt: Date.now(),
       isLocked: false,
@@ -296,6 +335,7 @@ function App() {
             user={user}
             roomId={roomId}
             username={username}
+            sessionId={sessionIdRef.current}
             darkMode={darkMode}
             onExit={() => {
               setView('landing');
@@ -522,6 +562,7 @@ function WhiteboardInterface({
   user,
   roomId,
   username,
+  sessionId,
   darkMode,
   onExit,
   onReady,
@@ -530,7 +571,14 @@ function WhiteboardInterface({
 }) {
   const canvasRef = useRef(null);
   const imageInputRef = useRef(null);
+  const toolbarRef = useRef(null);
   const clientIdRef = useRef(`client-${Math.random().toString(36).slice(2, 10)}-${Date.now().toString(36)}`);
+  const toolbarMovedRef = useRef(false);
+  const toolbarDragRef = useRef({
+    pointerId: null,
+    offsetX: 0,
+    offsetY: 0,
+  });
 
   const [fCanvas, setFCanvas] = useState(null);
   const [roomData, setRoomData] = useState(null);
@@ -547,9 +595,21 @@ function WhiteboardInterface({
   const [aiSummary, setAiSummary] = useState('');
   const [isAiLoading, setIsAiLoading] = useState(false);
   const [activePanel, setActivePanel] = useState('chat');
+  const [viewport, setViewport] = useState(() => ({
+    width: window.innerWidth,
+    height: window.innerHeight,
+  }));
+  const isMobile = viewport.width < MOBILE_BREAKPOINT;
+  const [isCollaborationOpen, setIsCollaborationOpen] = useState(
+    () => window.innerWidth >= DESKTOP_PANEL_BREAKPOINT,
+  );
+  const [toolbarPosition, setToolbarPosition] = useState(() =>
+    getDefaultToolbarPosition(window.innerWidth, window.innerHeight, window.innerWidth < MOBILE_BREAKPOINT),
+  );
 
   const isApplyingRemoteRef = useRef(false);
   const isApplyingHistoryRef = useRef(false);
+  const hostSessionSyncRef = useRef(false);
   const pendingShapeRef = useRef(null);
   const remoteVersionRef = useRef(null);
   const panRef = useRef({
@@ -563,12 +623,26 @@ function WhiteboardInterface({
   const undoStackRef = useRef([]);
   const redoStackRef = useRef([]);
 
+  const clampToolbarPosition = (position) => {
+    const toolbarWidth = toolbarRef.current?.offsetWidth || Math.min(viewport.width - 24, 620);
+    const toolbarHeight = toolbarRef.current?.offsetHeight || 132;
+
+    return {
+      x: Math.min(Math.max(12, position.x), Math.max(12, viewport.width - toolbarWidth - 12)),
+      y: Math.min(Math.max(12, position.y), Math.max(12, viewport.height - toolbarHeight - 12)),
+    };
+  };
+
   const roomRef = useMemo(
     () => doc(db, 'artifacts', appId, 'public', 'data', 'rooms', roomId),
     [roomId],
   );
 
-  const isBoardLockedForMe = roomData?.isLocked && roomData?.hostId !== user?.uid;
+  const isCurrentHost = roomData?.hostSessionId
+    ? roomData.hostSessionId === sessionId
+    : roomData?.hostId === user?.uid;
+
+  const isBoardLockedForMe = roomData?.isLocked && !isCurrentHost;
 
   const serializeSnapshot = () =>
     JSON.stringify({
@@ -615,6 +689,66 @@ function WhiteboardInterface({
       lastUpdatedByUser: user.uid,
     });
   };
+
+  useEffect(() => {
+    const onResize = () => {
+      setViewport({
+        width: window.innerWidth,
+        height: window.innerHeight,
+      });
+    };
+
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+
+  useEffect(() => {
+    if (viewport.width < MOBILE_BREAKPOINT) {
+      setIsCollaborationOpen(false);
+    }
+  }, [viewport.width]);
+
+  useEffect(() => {
+    setToolbarPosition((current) => {
+      if (!toolbarMovedRef.current) {
+        return clampToolbarPosition(
+          getDefaultToolbarPosition(viewport.width, viewport.height, isMobile),
+        );
+      }
+
+      return clampToolbarPosition(current);
+    });
+  }, [isMobile, viewport.height, viewport.width]);
+
+  useEffect(() => {
+    const onPointerMove = (event) => {
+      if (toolbarDragRef.current.pointerId !== event.pointerId) return;
+
+      setToolbarPosition(
+        clampToolbarPosition({
+          x: event.clientX - toolbarDragRef.current.offsetX,
+          y: event.clientY - toolbarDragRef.current.offsetY,
+        }),
+      );
+    };
+
+    const stopDragging = (event) => {
+      if (toolbarDragRef.current.pointerId !== event.pointerId) return;
+      toolbarDragRef.current.pointerId = null;
+      document.body.style.userSelect = '';
+    };
+
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', stopDragging);
+    window.addEventListener('pointercancel', stopDragging);
+
+    return () => {
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', stopDragging);
+      window.removeEventListener('pointercancel', stopDragging);
+      document.body.style.userSelect = '';
+    };
+  }, [viewport.height, viewport.width]);
 
   useEffect(() => {
     if (!window.fabric) return;
@@ -698,6 +832,16 @@ function WhiteboardInterface({
   }, [db, fCanvas, onReady, roomId, roomRef, user]);
 
   useEffect(() => {
+    if (!db || !roomData || !user || roomData.hostSessionId || hostSessionSyncRef.current) return;
+    if (roomData.hostId !== user.uid) return;
+
+    hostSessionSyncRef.current = true;
+    void updateDoc(roomRef, { hostSessionId: sessionId }).catch(() => {
+      hostSessionSyncRef.current = false;
+    });
+  }, [db, roomData, roomRef, sessionId, user]);
+
+  useEffect(() => {
     if (!fCanvas) return;
 
     const assignId = (obj) => {
@@ -751,7 +895,13 @@ function WhiteboardInterface({
     const canvas = fCanvas;
     canvas.isDrawingMode = activeTool === TOOL.DRAW;
     canvas.selection = activeTool === TOOL.SELECT;
-    canvas.defaultCursor = activeTool === TOOL.ERASER ? 'not-allowed' : activeTool === TOOL.HAND ? 'grab' : 'crosshair';
+    canvas.defaultCursor = getCanvasCursor(activeTool);
+    canvas.hoverCursor = activeTool === TOOL.SELECT ? 'move' : getCanvasCursor(activeTool);
+    canvas.moveCursor = 'move';
+
+    if (canvas.upperCanvasEl) {
+      canvas.upperCanvasEl.style.cursor = getCanvasCursor(activeTool);
+    }
 
     canvas.forEachObject((obj) => {
       obj.selectable = activeTool === TOOL.SELECT;
@@ -892,7 +1042,10 @@ function WhiteboardInterface({
       panRef.current.isDragging = false;
       fCanvas.selection = panRef.current.prevSelection;
       fCanvas.isDrawingMode = panRef.current.prevDrawingMode;
-      fCanvas.defaultCursor = activeTool === TOOL.HAND ? 'grab' : 'crosshair';
+      fCanvas.defaultCursor = getCanvasCursor(activeTool);
+      if (fCanvas.upperCanvasEl) {
+        fCanvas.upperCanvasEl.style.cursor = getCanvasCursor(activeTool);
+      }
     };
 
     fCanvas.on('mouse:down', onMouseDown);
@@ -1065,8 +1218,21 @@ function WhiteboardInterface({
   };
 
   const toggleLock = async () => {
-    if (roomData?.hostId !== user.uid) return;
+    if (!isCurrentHost) return;
     await updateDoc(roomRef, { isLocked: !roomData.isLocked });
+  };
+
+  const startToolbarDrag = (event) => {
+    const toolbarRect = toolbarRef.current?.getBoundingClientRect();
+    if (!toolbarRect) return;
+
+    toolbarMovedRef.current = true;
+    toolbarDragRef.current = {
+      pointerId: event.pointerId,
+      offsetX: event.clientX - toolbarRect.left,
+      offsetY: event.clientY - toolbarRect.top,
+    };
+    document.body.style.userSelect = 'none';
   };
 
   const toolItems = [
@@ -1096,12 +1262,12 @@ function WhiteboardInterface({
         <canvas ref={canvasRef} />
       </main>
 
-      <div className="absolute top-3 left-3 sm:left-6 z-50 rounded-xl border border-slate-200 bg-white/90 dark:bg-slate-900/90 dark:border-slate-700 backdrop-blur px-3 py-2 flex items-center gap-2 shadow-md">
+      <div className="absolute top-3 left-3 right-3 sm:left-6 sm:right-auto z-50 rounded-2xl border border-slate-200 bg-white/90 dark:bg-slate-900/90 dark:border-slate-700 backdrop-blur px-3 py-2 flex max-w-[calc(100vw-1.5rem)] flex-wrap items-center gap-2 shadow-md sm:max-w-none">
         <button onClick={onExit} className="h-8 w-8 grid place-items-center rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800" title="Exit board">
           <LogOut size={16} />
         </button>
         <div className="h-6 w-px bg-slate-200 dark:bg-slate-700" />
-        <div>
+        <div className="min-w-0 flex-1 sm:flex-none">
           <p className="text-xs font-semibold">Room {roomId}</p>
           <p className="text-[11px] text-slate-500 dark:text-slate-400">{roomData?.participants?.length || 1} online</p>
         </div>
@@ -1114,77 +1280,101 @@ function WhiteboardInterface({
         <button onClick={onToggleDark} className="h-8 w-8 grid place-items-center rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800" title="Toggle theme">
           {darkMode ? <Sun size={15} /> : <Moon size={15} />}
         </button>
-        {roomData?.hostId === user.uid && (
+        <button
+          onClick={() => setIsCollaborationOpen((current) => !current)}
+          className="h-8 rounded-lg border border-slate-300 dark:border-slate-600 px-2 text-xs font-medium hover:bg-slate-100 dark:hover:bg-slate-800"
+          title="Toggle collaboration panel"
+        >
+          {isCollaborationOpen ? 'Hide collab' : 'Show collab'}
+        </button>
+        {isCurrentHost && (
           <button
             onClick={toggleLock}
             className="h-8 px-2 rounded-lg border border-slate-300 dark:border-slate-600 text-xs hover:bg-slate-100 dark:hover:bg-slate-800"
+            title={roomData?.isLocked ? 'Unlock the board for collaborators' : 'Lock the board so only the host can edit'}
           >
             {roomData?.isLocked ? 'Unlock' : 'Lock'}
           </button>
         )}
-        {roomData?.isLocked && <Lock size={14} className="text-amber-500" />}
+        {roomData?.isLocked && <Lock size={14} className="text-amber-500" title={isCurrentHost ? 'Board is locked for collaborators' : 'Board is locked by the host'} />}
       </div>
 
-      <div className="fixed inset-x-0 top-14 sm:top-16 z-[120] flex justify-center pointer-events-none px-3">
+      <div
+        className="absolute z-[120] pointer-events-none"
+        style={{ left: toolbarPosition.x, top: toolbarPosition.y }}
+      >
         <Motion.div
+          ref={toolbarRef}
           initial={{ opacity: 0, y: -8 }}
           animate={{ opacity: 1, y: 0 }}
-          className="pointer-events-auto rounded-2xl border border-slate-300 bg-white/95 dark:bg-slate-900/95 dark:border-slate-600 backdrop-blur px-2 py-2 shadow-2xl"
+          className="pointer-events-auto w-[min(620px,calc(100vw-1.5rem))] rounded-2xl border border-slate-300 bg-white/95 dark:bg-slate-900/95 dark:border-slate-600 backdrop-blur px-2 py-2 shadow-2xl"
         >
-          <div className="flex items-center gap-2 overflow-x-auto max-w-[96vw]">
-          {toolItems.map((tool) => (
-            <Motion.button
-              whileHover={{ scale: 1.06 }}
-              whileTap={{ scale: 0.96 }}
-              key={tool.id}
-              className={toolButtonClass(activeTool === tool.id)}
-              onClick={() => {
-                if (isBoardLockedForMe) return;
-                if (tool.id === TOOL.IMAGE) {
-                  handleUploadImage();
-                  return;
-                }
-                setActiveTool(tool.id);
-              }}
-              title={tool.label}
+          <div className="mb-2 flex items-center justify-between gap-3 px-1">
+            <button
+              type="button"
+              onPointerDown={startToolbarDrag}
+              className="flex h-9 items-center gap-2 rounded-xl border border-slate-300 dark:border-slate-600 px-3 text-xs font-medium text-slate-600 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 touch-none"
+              title="Drag toolbar"
             >
-              {tool.icon}
-            </Motion.button>
-          ))}
+              <Move size={14} />
+              Drag toolbar
+            </button>
+            <p className="text-[11px] text-slate-500 dark:text-slate-400">
+              {isMobile ? 'Move it anywhere that stays out of the way.' : 'Reposition the toolbar wherever it fits your board.'}
+            </p>
+          </div>
 
-          <div className="h-8 w-px bg-slate-200 dark:bg-slate-700" />
-
-          <button className="h-10 w-10 rounded-xl border border-slate-200 bg-white/90 dark:bg-slate-900/90 dark:border-slate-700 grid place-items-center" onClick={() => setShowBgModal(true)} title="Canvas background">
-            <Paintbrush size={16} />
-          </button>
-
-          <input
-            type="color"
-            value={strokeColor}
-            onChange={(e) => setStrokeColor(e.target.value)}
-            className="h-10 w-10 rounded-xl border border-slate-200 dark:border-slate-700 bg-transparent p-1"
-            title="Stroke color"
-          />
-
-          <select
-            className="h-10 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 text-sm"
-            value={strokeWidth}
-            onChange={(e) => setStrokeWidth(Number(e.target.value))}
-            title="Stroke width"
-          >
-            {[1, 2, 3, 4, 6, 8].map((w) => (
-              <option key={w} value={w}>{w}px</option>
+          <div className="flex items-center gap-2 overflow-x-auto pb-1">
+            {toolItems.map((tool) => (
+              <Motion.button
+                whileHover={{ scale: 1.06 }}
+                whileTap={{ scale: 0.96 }}
+                key={tool.id}
+                className={toolButtonClass(activeTool === tool.id)}
+                onClick={() => {
+                  if (isBoardLockedForMe) return;
+                  if (tool.id === TOOL.IMAGE) {
+                    handleUploadImage();
+                    return;
+                  }
+                  setActiveTool(tool.id);
+                }}
+                title={tool.label}
+              >
+                {tool.icon}
+              </Motion.button>
             ))}
-          </select>
+
+            <div className="h-8 w-px bg-slate-200 dark:bg-slate-700" />
+
+            <button className="h-10 w-10 rounded-xl border border-slate-200 bg-white/90 dark:bg-slate-900/90 dark:border-slate-700 grid place-items-center" onClick={() => setShowBgModal(true)} title="Canvas background">
+              <Paintbrush size={16} />
+            </button>
+
+            <input
+              type="color"
+              value={strokeColor}
+              onChange={(e) => setStrokeColor(e.target.value)}
+              className="h-10 w-10 rounded-xl border border-slate-200 dark:border-slate-700 bg-transparent p-1"
+              title="Stroke color"
+            />
+
+            <select
+              className="h-10 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 text-sm"
+              value={strokeWidth}
+              onChange={(e) => setStrokeWidth(Number(e.target.value))}
+              title="Stroke width"
+            >
+              {[1, 2, 3, 4, 6, 8].map((w) => (
+                <option key={w} value={w}>{w}px</option>
+              ))}
+            </select>
           </div>
         </Motion.div>
       </div>
 
-      <div className="absolute left-3 sm:left-6 top-1/2 -translate-y-1/2 z-50">
-        <div className="rounded-2xl border border-slate-200 dark:border-slate-700 bg-white/70 dark:bg-slate-900/70 backdrop-blur px-2 py-2 flex flex-col gap-2 shadow-xl sm:flex-col max-sm:flex-row max-sm:translate-y-[40vh]">
-          <Motion.button whileHover={{ scale: 1.06 }} whileTap={{ scale: 0.95 }} onClick={() => setActiveTool(TOOL.ERASER)} className={toolButtonClass(activeTool === TOOL.ERASER)} title="Eraser">
-            <Eraser size={16} />
-          </Motion.button>
+      <div className="absolute left-3 bottom-20 sm:left-6 sm:bottom-auto sm:top-1/2 sm:-translate-y-1/2 z-50">
+        <div className="rounded-2xl border border-slate-200 dark:border-slate-700 bg-white/70 dark:bg-slate-900/70 backdrop-blur px-2 py-2 flex flex-row gap-2 shadow-xl sm:flex-col">
           <Motion.button whileHover={{ scale: 1.06 }} whileTap={{ scale: 0.95 }} onClick={handleUndo} className={toolButtonClass(false)} title="Undo">
             <Undo2 size={16} />
           </Motion.button>
@@ -1194,7 +1384,7 @@ function WhiteboardInterface({
         </div>
       </div>
 
-      <div className="absolute left-3 sm:left-6 bottom-3 sm:bottom-6 z-50 rounded-2xl border border-slate-200 dark:border-slate-700 bg-white/75 dark:bg-slate-900/75 backdrop-blur px-3 py-2 shadow-xl flex items-center gap-2">
+      <div className="absolute left-3 bottom-3 sm:left-6 sm:bottom-6 z-50 rounded-2xl border border-slate-200 dark:border-slate-700 bg-white/75 dark:bg-slate-900/75 backdrop-blur px-3 py-2 shadow-xl flex items-center gap-2 max-w-[calc(100vw-6rem)]">
         <button onClick={() => setZoomLevel(zoom - 0.1)} className="h-8 w-8 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 grid place-items-center" title="Zoom out">
           <Minus size={14} />
         </button>
@@ -1256,6 +1446,7 @@ function WhiteboardInterface({
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: 8 }}
             className="absolute right-3 sm:right-6 bottom-3 sm:bottom-6 z-40 rounded-xl border border-slate-200 dark:border-slate-700 bg-white/75 dark:bg-slate-900/75 px-3 py-2 text-xs text-slate-600 dark:text-slate-300 backdrop-blur"
+            style={{ bottom: isMobile && isCollaborationOpen ? Math.min(viewport.height * 0.6, 420) + 20 : undefined }}
           >
             To move canvas, hold Space while dragging.
             <button onClick={() => setShowPanHint(false)} className="ml-2 text-slate-500">Hide</button>
@@ -1263,109 +1454,133 @@ function WhiteboardInterface({
         )}
       </AnimatePresence>
 
-      <aside className="absolute top-16 right-3 sm:right-6 bottom-16 sm:bottom-6 w-[320px] max-w-[90vw] rounded-2xl border border-slate-200 dark:border-slate-700 bg-white/80 dark:bg-slate-900/80 backdrop-blur shadow-xl flex flex-col overflow-hidden z-50">
-        <div className="px-4 py-3 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between">
-          <p className="text-sm font-semibold">Collaboration</p>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => setActivePanel('chat')}
-              className={`h-8 w-8 rounded-lg grid place-items-center ${activePanel === 'chat' ? 'bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900' : 'hover:bg-slate-100 dark:hover:bg-slate-800'}`}
-              title="Chat"
-            >
-              <MessageSquare size={14} />
-            </button>
-            <button
-              onClick={() => setActivePanel('users')}
-              className={`h-8 w-8 rounded-lg grid place-items-center ${activePanel === 'users' ? 'bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900' : 'hover:bg-slate-100 dark:hover:bg-slate-800'}`}
-              title="Users"
-            >
-              <Users size={14} />
-            </button>
-            <button
-              onClick={() => setActivePanel('ai')}
-              className={`h-8 w-8 rounded-lg grid place-items-center ${activePanel === 'ai' ? 'bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900' : 'hover:bg-slate-100 dark:hover:bg-slate-800'}`}
-              title="AI summary"
-            >
-              <Sparkles size={14} />
-            </button>
-            <button
-              onClick={exportCanvasPng}
-              className="h-8 w-8 rounded-lg grid place-items-center hover:bg-slate-100 dark:hover:bg-slate-800"
-              title="Export PNG"
-            >
-              <Upload size={15} />
-            </button>
-          </div>
-        </div>
-
-        {activePanel === 'chat' && (
-          <>
-            <div className="flex-1 overflow-y-auto px-4 py-3 space-y-2">
-              {messages.map((m, idx) => (
-                <Motion.div
-                  key={`${m.timestamp || idx}-${idx}`}
-                  initial={{ opacity: 0, y: 5 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  className={`max-w-[90%] rounded-xl px-3 py-2 text-sm ${
-                    m.senderId === user.uid
-                      ? 'ml-auto bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900'
-                      : 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-100'
-                  }`}
+      <AnimatePresence>
+        {isCollaborationOpen && (
+          <Motion.aside
+            initial={isMobile ? { opacity: 0, y: 24 } : { opacity: 0, x: 24 }}
+            animate={{ opacity: 1, x: 0, y: 0 }}
+            exit={isMobile ? { opacity: 0, y: 24 } : { opacity: 0, x: 24 }}
+            className={`absolute z-50 overflow-hidden rounded-2xl border border-slate-200 bg-white/80 shadow-xl backdrop-blur dark:border-slate-700 dark:bg-slate-900/80 ${
+              isMobile
+                ? 'left-3 right-3 bottom-3 h-[min(60vh,420px)]'
+                : 'top-16 right-3 bottom-16 w-[320px] max-w-[90vw] sm:right-6 sm:bottom-6'
+            } flex flex-col`}
+          >
+            <div className="px-4 py-3 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between gap-3">
+              <div>
+                <p className="text-sm font-semibold">Collaboration</p>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                  {isMobile ? 'Chat, people, and AI tools in one sheet.' : 'Chat, participants, and AI summary.'}
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setActivePanel('chat')}
+                  className={`h-8 w-8 rounded-lg grid place-items-center ${activePanel === 'chat' ? 'bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900' : 'hover:bg-slate-100 dark:hover:bg-slate-800'}`}
+                  title="Chat"
                 >
-                  <p className="text-[10px] opacity-70 mb-1">{m.sender}</p>
-                  {m.text}
-                </Motion.div>
-              ))}
+                  <MessageSquare size={14} />
+                </button>
+                <button
+                  onClick={() => setActivePanel('users')}
+                  className={`h-8 w-8 rounded-lg grid place-items-center ${activePanel === 'users' ? 'bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900' : 'hover:bg-slate-100 dark:hover:bg-slate-800'}`}
+                  title="Users"
+                >
+                  <Users size={14} />
+                </button>
+                <button
+                  onClick={() => setActivePanel('ai')}
+                  className={`h-8 w-8 rounded-lg grid place-items-center ${activePanel === 'ai' ? 'bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900' : 'hover:bg-slate-100 dark:hover:bg-slate-800'}`}
+                  title="AI summary"
+                >
+                  <Sparkles size={14} />
+                </button>
+                <button
+                  onClick={exportCanvasPng}
+                  className="h-8 w-8 rounded-lg grid place-items-center hover:bg-slate-100 dark:hover:bg-slate-800"
+                  title="Export PNG"
+                >
+                  <Upload size={15} />
+                </button>
+                <button
+                  onClick={() => setIsCollaborationOpen(false)}
+                  className="h-8 rounded-lg border border-slate-300 px-2 text-xs hover:bg-slate-100 dark:border-slate-600 dark:hover:bg-slate-800"
+                  title="Close collaboration panel"
+                >
+                  Hide
+                </button>
+              </div>
             </div>
 
-            <form onSubmit={sendMessage} className="p-3 border-t border-slate-200 dark:border-slate-700 flex gap-2">
-              <input
-                value={chatMsg}
-                onChange={(e) => setChatMsg(e.target.value)}
-                placeholder="Live chat"
-                className="flex-1 h-10 rounded-xl border border-slate-300 dark:border-slate-700 px-3 bg-white/80 dark:bg-slate-900"
-              />
-              <Motion.button
-                whileTap={{ scale: 0.95 }}
-                type="submit"
-                className="h-10 w-10 rounded-xl bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900 grid place-items-center"
-              >
-                <Send size={15} />
-              </Motion.button>
-            </form>
-          </>
-        )}
+            {activePanel === 'chat' && (
+              <>
+                <div className="flex-1 overflow-y-auto px-4 py-3 space-y-2">
+                  {messages.map((m, idx) => (
+                    <Motion.div
+                      key={`${m.timestamp || idx}-${idx}`}
+                      initial={{ opacity: 0, y: 5 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      className={`max-w-[90%] rounded-xl px-3 py-2 text-sm ${
+                        m.senderId === user.uid
+                          ? 'ml-auto bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900'
+                          : 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-100'
+                      }`}
+                    >
+                      <p className="text-[10px] opacity-70 mb-1">{m.sender}</p>
+                      {m.text}
+                    </Motion.div>
+                  ))}
+                </div>
 
-        {activePanel === 'users' && (
-          <div className="p-4 space-y-2 overflow-y-auto">
-            <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">Participants</p>
-            {(roomData?.participants || []).map((p, idx) => (
-              <div key={`${p.uid}-${idx}`} className="rounded-xl border border-slate-200 dark:border-slate-700 px-3 py-2 bg-white/70 dark:bg-slate-950/50">
-                <p className="text-sm font-medium">{p.name}{p.uid === user.uid ? ' (You)' : ''}</p>
-                <p className="text-[11px] text-slate-500">{p.uid === roomData?.hostId ? 'Host' : 'Collaborator'}</p>
-              </div>
-            ))}
-          </div>
-        )}
+                <form onSubmit={sendMessage} className="p-3 border-t border-slate-200 dark:border-slate-700 flex gap-2">
+                  <input
+                    value={chatMsg}
+                    onChange={(e) => setChatMsg(e.target.value)}
+                    placeholder="Live chat"
+                    className="flex-1 h-10 rounded-xl border border-slate-300 dark:border-slate-700 px-3 bg-white/80 dark:bg-slate-900"
+                  />
+                  <Motion.button
+                    whileTap={{ scale: 0.95 }}
+                    type="submit"
+                    className="h-10 w-10 rounded-xl bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900 grid place-items-center"
+                  >
+                    <Send size={15} />
+                  </Motion.button>
+                </form>
+              </>
+            )}
 
-        {activePanel === 'ai' && (
-          <div className="p-4 overflow-y-auto">
-            <button
-              onClick={generateSummary}
-              disabled={isAiLoading}
-              className="w-full h-10 rounded-xl bg-slate-900 text-white text-sm font-semibold dark:bg-slate-100 dark:text-slate-900"
-            >
-              {isAiLoading ? 'Generating...' : 'AI Whiteboard Summary'}
-            </button>
-            {aiSummary && (
-              <div className="mt-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white/70 dark:bg-slate-950/70 p-3 text-xs leading-relaxed">
-                {aiSummary}
+            {activePanel === 'users' && (
+              <div className="p-4 space-y-2 overflow-y-auto">
+                <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">Participants</p>
+                {(roomData?.participants || []).map((p, idx) => (
+                  <div key={`${p.uid}-${idx}`} className="rounded-xl border border-slate-200 dark:border-slate-700 px-3 py-2 bg-white/70 dark:bg-slate-950/50">
+                    <p className="text-sm font-medium">{p.name}{p.uid === user.uid ? ' (You)' : ''}</p>
+                    <p className="text-[11px] text-slate-500">{p.uid === roomData?.hostId ? 'Host' : 'Collaborator'}</p>
+                  </div>
+                ))}
               </div>
             )}
-          </div>
-        )}
 
-      </aside>
+            {activePanel === 'ai' && (
+              <div className="p-4 overflow-y-auto">
+                <button
+                  onClick={generateSummary}
+                  disabled={isAiLoading}
+                  className="w-full h-10 rounded-xl bg-slate-900 text-white text-sm font-semibold dark:bg-slate-100 dark:text-slate-900"
+                >
+                  {isAiLoading ? 'Generating...' : 'AI Whiteboard Summary'}
+                </button>
+                {aiSummary && (
+                  <div className="mt-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white/70 dark:bg-slate-950/70 p-3 text-xs leading-relaxed">
+                    {aiSummary}
+                  </div>
+                )}
+              </div>
+            )}
+          </Motion.aside>
+        )}
+      </AnimatePresence>
 
       {isBoardLockedForMe && (
         <div className="absolute top-16 left-1/2 -translate-x-1/2 z-[60] px-4 py-2 rounded-full bg-amber-100 text-amber-700 text-xs border border-amber-200">

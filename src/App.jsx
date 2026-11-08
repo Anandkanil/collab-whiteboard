@@ -245,10 +245,11 @@ function App() {
     return () => unsub();
   }, []);
 
+  const notificationTimerRef = useRef(null);
   const showNotification = (message) => {
     setNotification(message);
-    window.clearTimeout(showNotification.timeoutRef);
-    showNotification.timeoutRef = window.setTimeout(() => setNotification(null), 3000);
+    window.clearTimeout(notificationTimerRef.current);
+    notificationTimerRef.current = window.setTimeout(() => setNotification(null), 3000);
   };
 
   const createRoom = async () => {
@@ -700,6 +701,14 @@ function WhiteboardInterface({
     });
   };
 
+  const lastLockToastRef = useRef(0);
+  const notifyBoardLocked = () => {
+    const now = Date.now();
+    if (now - lastLockToastRef.current < 3000) return;
+    lastLockToastRef.current = now;
+    showNotification('The host has locked this board. You can look around, but not edit.');
+  };
+
   const serializeSnapshot = () =>
     JSON.stringify({
       canvasData: fCanvas?.toJSON(['id']) || { objects: [], version: '5.3.0' },
@@ -1001,11 +1010,14 @@ function WhiteboardInterface({
     };
 
     const onMouseDown = async (opt) => {
-      if (isBoardLockedForMe) return;
-
       const event = opt.e;
       const isMiddleMouse = event.button === 1;
       const handLikePan = isSpacePressed || activeTool === TOOL.HAND || isMiddleMouse;
+
+      if (isBoardLockedForMe && !handLikePan) {
+        notifyBoardLocked();
+        return;
+      }
 
       if (handLikePan) {
         panRef.current.isDragging = true;
@@ -1136,7 +1148,8 @@ function WhiteboardInterface({
   }, [activeTool, fCanvas, isBoardLockedForMe, isSpacePressed, strokeColor, strokeWidth]);
 
   const handleUndo = async () => {
-    if (!fCanvas || isBoardLockedForMe) return;
+    if (!fCanvas) return;
+    if (isBoardLockedForMe) return notifyBoardLocked();
     if (undoStackRef.current.length <= 1) return;
 
     const current = undoStackRef.current.pop();
@@ -1150,7 +1163,8 @@ function WhiteboardInterface({
   };
 
   const handleRedo = async () => {
-    if (!fCanvas || isBoardLockedForMe) return;
+    if (!fCanvas) return;
+    if (isBoardLockedForMe) return notifyBoardLocked();
     if (!redoStackRef.current.length) return;
 
     const next = redoStackRef.current.pop();
@@ -1408,7 +1422,10 @@ function WhiteboardInterface({
                 key={tool.id}
                 className={toolButtonClass(activeTool === tool.id)}
                 onClick={() => {
-                  if (isBoardLockedForMe) return;
+                  if (isBoardLockedForMe && tool.id !== TOOL.HAND && tool.id !== TOOL.SELECT) {
+                    notifyBoardLocked();
+                    return;
+                  }
                   if (tool.id === TOOL.IMAGE) {
                     handleUploadImage();
                     return;
@@ -1423,7 +1440,7 @@ function WhiteboardInterface({
 
             <div className="h-8 w-px bg-slate-200 dark:bg-slate-700" />
 
-            <button className="h-10 w-10 rounded-xl border border-slate-200 bg-white/90 dark:bg-slate-900/90 dark:border-slate-700 grid place-items-center" onClick={() => !isBoardLockedForMe && setShowBgModal(true)} title="Canvas background">
+            <button className="h-10 w-10 rounded-xl border border-slate-200 bg-white/90 dark:bg-slate-900/90 dark:border-slate-700 grid place-items-center" onClick={() => (isBoardLockedForMe ? notifyBoardLocked() : setShowBgModal(true))} title="Canvas background">
               <Paintbrush size={16} />
             </button>
 

@@ -758,6 +758,10 @@ function WhiteboardInterface({
   });
 
   const [fCanvas, setFCanvas] = useState(null);
+  // Parent passes a new function each render; keep the latest in a ref so the
+  // Firestore listeners don't resubscribe on every render.
+  const onReadyRef = useRef(onReady);
+  onReadyRef.current = onReady;
   const [roomData, setRoomData] = useState(null);
   const [activeTool, setActiveTool] = useState(TOOL.DRAW);
   const [strokeColor, setStrokeColor] = useState(DEFAULT_STROKE);
@@ -1202,7 +1206,7 @@ function WhiteboardInterface({
           if (isEmpty) await migrateLegacyCanvas();
           if (!readyEmitted) {
             readyEmitted = true;
-            onReady();
+            onReadyRef.current();
           }
         });
       }
@@ -1211,7 +1215,7 @@ function WhiteboardInterface({
       showNotification('Could not load the board. The database rules may need updating.');
       if (!readyEmitted) {
         readyEmitted = true;
-        onReady();
+        onReadyRef.current();
       }
     });
 
@@ -1227,7 +1231,7 @@ function WhiteboardInterface({
       unsubChat();
       window.clearTimeout(flushTimerRef.current);
     };
-  }, [db, fCanvas, onReady, roomId, roomRef, user]);
+  }, [db, fCanvas, roomId, roomRef, user]);
 
   useEffect(() => {
     if (!db || !roomData || !user || roomData.hostSessionId || hostSessionSyncRef.current) return;

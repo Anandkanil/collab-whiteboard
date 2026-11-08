@@ -1086,7 +1086,8 @@ function WhiteboardInterface({
       e.preventDefault();
       e.stopPropagation();
       if (e.ctrlKey || e.metaKey) {
-        const nextZoom = clampZoom(fCanvas.getZoom() * 0.99 ** e.deltaY);
+        const delta = Math.max(-100, Math.min(100, e.deltaY));
+        const nextZoom = clampZoom(fCanvas.getZoom() * 0.998 ** delta);
         fCanvas.zoomToPoint(new fabric.Point(e.offsetX, e.offsetY), nextZoom);
         setZoom(Number(nextZoom.toFixed(2)));
       } else {

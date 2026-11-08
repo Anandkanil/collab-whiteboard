@@ -77,7 +77,12 @@ netlify/
   functions/
     summarize.mjs  # AI summary endpoint
 netlify.toml     # Netlify build settings
+firestore.rules  # Firestore security rules
 ```
+
+## Firebase security rules
+
+The Firestore rules live in `firestore.rules`. Paste them into Firebase console → Firestore Database → Rules and click Publish whenever they change.
 
 ## Deployment
 

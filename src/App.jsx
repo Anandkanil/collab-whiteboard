@@ -260,21 +260,26 @@ function App() {
     const newRoom = generateRoomId();
     const roomRef = doc(db, 'artifacts', appId, 'public', 'data', 'rooms', newRoom);
 
-    await setDoc(roomRef, {
-      roomId: newRoom,
-      hostId: user.uid,
-      hostSessionId: sessionIdRef.current,
-      hostName: username.trim(),
-      createdAt: Date.now(),
-      isLocked: false,
-      canvasData: JSON.stringify({ objects: [], version: '5.3.0' }),
-      canvasSettings: {
-        backgroundColor: DEFAULT_BACKGROUND,
-      },
-      lastUpdatedAt: Date.now(),
-      lastUpdatedByClient: null,
-      participants: [{ uid: user.uid, name: username.trim() }],
-    });
+    try {
+      await setDoc(roomRef, {
+        roomId: newRoom,
+        hostId: user.uid,
+        hostSessionId: sessionIdRef.current,
+        hostName: username.trim(),
+        createdAt: Date.now(),
+        isLocked: false,
+        canvasData: JSON.stringify({ objects: [], version: '5.3.0' }),
+        canvasSettings: {
+          backgroundColor: DEFAULT_BACKGROUND,
+        },
+        lastUpdatedAt: Date.now(),
+        lastUpdatedByClient: null,
+        participants: [{ uid: user.uid, name: username.trim() }],
+      });
+    } catch (err) {
+      console.error('Creating room failed', err);
+      return showNotification('Could not create the board. Please try again.');
+    }
 
     setRoomId(newRoom);
     setIsBoardLoading(true);
@@ -292,15 +297,20 @@ function App() {
 
     const normalized = roomId.trim().toUpperCase();
     const roomRef = doc(db, 'artifacts', appId, 'public', 'data', 'rooms', normalized);
-    const snap = await getDoc(roomRef);
+    try {
+      const snap = await getDoc(roomRef);
 
-    if (!snap.exists()) {
-      return showNotification('Room not found.');
+      if (!snap.exists()) {
+        return showNotification('Room not found.');
+      }
+
+      await updateDoc(roomRef, {
+        participants: arrayUnion({ uid: user.uid, name: username.trim() }),
+      });
+    } catch (err) {
+      console.error('Joining room failed', err);
+      return showNotification('Could not join the board. Please try again.');
     }
-
-    await updateDoc(roomRef, {
-      participants: arrayUnion({ uid: user.uid, name: username.trim() }),
-    });
 
     setRoomId(normalized);
     setIsBoardLoading(true);
@@ -1261,14 +1271,24 @@ function WhiteboardInterface({
     e.preventDefault();
     if (!db || !chatMsg.trim()) return;
 
+    const text = chatMsg.trim().slice(0, 1000);
     const chatCol = collection(db, 'artifacts', appId, 'public', 'data', 'rooms', roomId, 'chat');
-    await setDoc(doc(chatCol), {
-      sender: username || 'Guest',
-      senderId: user.uid,
-      text: chatMsg.trim(),
-      timestamp: Date.now(),
-    });
-    setChatMsg('');
+    try {
+      await setDoc(doc(chatCol), {
+        sender: username || 'Guest',
+        senderId: user.uid,
+        text,
+        timestamp: Date.now(),
+      });
+      setChatMsg('');
+    } catch (err) {
+      console.error('Sending chat message failed', err);
+      showNotification(
+        err?.code === 'permission-denied'
+          ? 'Chat is blocked by the database rules. Ask the board owner to update them.'
+          : 'Message not sent. Check your connection and try again.',
+      );
+    }
   };
 
   const generateSummary = async () => {

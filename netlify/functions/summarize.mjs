@@ -38,36 +38,54 @@ export default async (req) => {
     `Element counts: ${JSON.stringify(counts).slice(0, 500)}`,
   ].join('\n');
 
-  const model = process.env.GEMINI_MODEL || 'gemini-flash-latest';
+  // Try the main model first; if Google says it's busy (or it's slow), fall back
+  // to the lighter Flash model. Each attempt is capped so the function never
+  // hits Netlify's request timeout.
+  const models = [...new Set([process.env.GEMINI_MODEL || 'gemini-flash-latest', 'gemini-flash-lite-latest'])];
+  const ATTEMPT_TIMEOUT_MS = 12000;
+  let busy = false;
 
-  try {
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-goog-api-key': apiKey,
+  for (const model of models) {
+    try {
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-goog-api-key': apiKey,
+          },
+          body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
+          signal: AbortSignal.timeout(ATTEMPT_TIMEOUT_MS),
         },
-        body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
-      },
-    );
+      );
 
-    const data = await res.json().catch(() => ({}));
+      const data = await res.json().catch(() => ({}));
 
-    if (!res.ok) {
-      console.error('Gemini error', res.status, data?.error?.message);
-      return json(502, { error: `The AI service returned an error (${res.status}). Please try again later.` });
+      if (!res.ok) {
+        console.error('Gemini error', model, res.status, data?.error?.message);
+        if ([429, 500, 503, 504].includes(res.status)) {
+          busy = true;
+          continue;
+        }
+        return json(502, { error: `The AI service returned an error (${res.status}). Please try again later.` });
+      }
+
+      const summary = data?.candidates?.[0]?.content?.parts
+        ?.map((part) => part.text || '')
+        .join('')
+        .trim();
+
+      return json(200, { summary: summary || 'No summary generated.' });
+    } catch (err) {
+      console.error('Gemini request failed', model, err?.name, err?.message);
+      busy = true;
     }
-
-    const summary = data?.candidates?.[0]?.content?.parts
-      ?.map((part) => part.text || '')
-      .join('')
-      .trim();
-
-    return json(200, { summary: summary || 'No summary generated.' });
-  } catch (err) {
-    console.error('Gemini request failed', err);
-    return json(502, { error: 'Could not reach the AI service. Please try again later.' });
   }
+
+  return json(503, {
+    error: busy
+      ? 'The AI is busy right now. Please try again in a minute.'
+      : 'Could not reach the AI service. Please try again later.',
+  });
 };

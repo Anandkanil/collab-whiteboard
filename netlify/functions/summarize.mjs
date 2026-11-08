@@ -38,7 +38,7 @@ export default async (req) => {
     `Element counts: ${JSON.stringify(counts).slice(0, 500)}`,
   ].join('\n');
 
-  const model = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+  const model = process.env.GEMINI_MODEL || 'gemini-flash-latest';
 
   try {
     const res = await fetch(

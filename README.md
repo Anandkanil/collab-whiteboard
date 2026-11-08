@@ -57,7 +57,7 @@ npx netlify dev
 | `VITE_FIREBASE_*` | `.env` and Netlify | Firebase web app config (public by design) |
 | `VITE_APP_ID` | `.env` and Netlify | Namespace for rooms in Firestore |
 | `GEMINI_API_KEY` | Netlify only | Gemini API key for the AI summary. Never prefix with `VITE_`. |
-| `GEMINI_MODEL` | Netlify (optional) | Override the Gemini model (default `gemini-2.5-flash`) |
+| `GEMINI_MODEL` | Netlify (optional) | Override the Gemini model (default `gemini-flash-latest`, which always points at the current Flash model) |
 
 ## Scripts
 

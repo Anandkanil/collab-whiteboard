@@ -6,6 +6,7 @@ import {
   Copy,
   Download,
   Eraser,
+  FileText,
   Image as ImageIcon,
   Lock,
   LogOut,
@@ -24,7 +25,6 @@ import {
   Sun,
   Type,
   Undo2,
-  Upload,
   Users,
   Wand2,
 } from 'lucide-react';
@@ -49,7 +49,6 @@ import {
   signInWithCustomToken,
 } from 'firebase/auth';
 
-const geminiApiKey = import.meta.env.VITE_GEMINI_API_KEY;
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
   authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
@@ -158,6 +157,39 @@ const copyToClipboard = async (text) => {
     document.body.removeChild(area);
     return false;
   }
+};
+
+// Builds a one-page PDF that contains a single JPEG image. Written by hand so
+// the app needs no extra PDF library.
+const buildPdfFromJpeg = (jpegBinary, imageWidth, imageHeight) => {
+  const pageWidth = Math.round(imageWidth * 0.75);
+  const pageHeight = Math.round(imageHeight * 0.75);
+  const content = `q ${pageWidth} 0 0 ${pageHeight} 0 0 cm /Im0 Do Q`;
+  const objects = [
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+    `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pageWidth} ${pageHeight}] /Resources << /XObject << /Im0 4 0 R >> >> /Contents 5 0 R >>`,
+    `<< /Type /XObject /Subtype /Image /Width ${imageWidth} /Height ${imageHeight} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${jpegBinary.length} >>\nstream\n${jpegBinary}\nendstream`,
+    `<< /Length ${content.length} >>\nstream\n${content}\nendstream`,
+  ];
+
+  let pdf = '%PDF-1.4\n%\u00ff\u00ff\u00ff\u00ff\n';
+  const offsets = objects.map((body, index) => {
+    const offset = pdf.length;
+    pdf += `${index + 1} 0 obj\n${body}\nendobj\n`;
+    return offset;
+  });
+
+  const xrefOffset = pdf.length;
+  pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+  pdf += offsets.map((offset) => `${String(offset).padStart(10, '0')} 00000 n \n`).join('');
+  pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`;
+
+  const bytes = new Uint8Array(pdf.length);
+  for (let i = 0; i < pdf.length; i += 1) {
+    bytes[i] = pdf.charCodeAt(i) & 0xff;
+  }
+  return new Blob([bytes], { type: 'application/pdf' });
 };
 
 const toolButtonClass = (active) =>
@@ -459,18 +491,27 @@ function LandingPage({
 
           <div className="mt-8 grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
             {[
-              ['Real-time collaboration', 'Collaborate together with live cursors and updates.'],
+              ['Real-time collaboration', 'Draw together and see each other\'s changes appear instantly.'],
               ['AI whiteboard summary', 'Generate quick summaries of ideas and next steps.'],
-              ['Persistent board history', 'Undo, redo, and continue where the team left off.'],
-              ['Export to PDF', 'Export snapshots for documentation and handoff.'],
+              ['Undo & redo', 'Step back and forward through your changes while you work.'],
+              ['Export to PNG or PDF', 'Download snapshots for documentation and handoff.'],
               ['Live chat', 'Keep board discussion in context.'],
-            ].map(([title, text]) => (
+              ['Live cursors', 'See where everyone is pointing on the board.', true],
+              ['Version history', 'Return to earlier versions of a board anytime.', true],
+            ].map(([title, text, comingSoon]) => (
               <Motion.div
                 key={title}
                 whileHover={{ y: -3 }}
-                className="rounded-2xl p-4 bg-white/65 border border-white/90 shadow-md backdrop-blur dark:bg-slate-900/60 dark:border-slate-700"
+                className={`rounded-2xl p-4 bg-white/65 border border-white/90 shadow-md backdrop-blur dark:bg-slate-900/60 dark:border-slate-700 ${comingSoon ? 'opacity-75' : ''}`}
               >
-                <p className="font-semibold text-sm">{title}</p>
+                <p className="font-semibold text-sm flex flex-wrap items-center gap-2">
+                  {title}
+                  {comingSoon && (
+                    <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-700 dark:bg-amber-950/60 dark:text-amber-200">
+                      Coming soon
+                    </span>
+                  )}
+                </p>
                 <p className="text-xs mt-2 text-slate-600 dark:text-slate-300">{text}</p>
               </Motion.div>
             ))}
@@ -642,7 +683,22 @@ function WhiteboardInterface({
     ? roomData.hostSessionId === sessionId
     : roomData?.hostId === user?.uid;
 
-  const isBoardLockedForMe = roomData?.isLocked && !isCurrentHost;
+  const isBoardLockedForMe = Boolean(roomData?.isLocked && !isCurrentHost);
+
+  // Refs let canvas event handlers (registered once) see the latest values.
+  const isLockedRef = useRef(false);
+  const activeToolRef = useRef(TOOL.DRAW);
+  isLockedRef.current = isBoardLockedForMe;
+  activeToolRef.current = activeTool;
+
+  const applyObjectInteractivity = () => {
+    if (!fCanvas) return;
+    const selectable = !isLockedRef.current && activeToolRef.current === TOOL.SELECT;
+    fCanvas.forEachObject((obj) => {
+      obj.selectable = selectable;
+      obj.evented = !isLockedRef.current;
+    });
+  };
 
   const serializeSnapshot = () =>
     JSON.stringify({
@@ -660,6 +716,7 @@ function WhiteboardInterface({
     fCanvas.loadFromJSON(nextCanvasData, () => {
       setBackgroundColor(nextBackground);
       fCanvas.backgroundColor = nextBackground;
+      applyObjectInteractivity();
       fCanvas.renderAll();
       isApplyingRemoteRef.current = false;
     });
@@ -676,7 +733,7 @@ function WhiteboardInterface({
   };
 
   const syncRoomCanvas = async () => {
-    if (!fCanvas || !db || isApplyingRemoteRef.current) return;
+    if (!fCanvas || !db || isApplyingRemoteRef.current || isLockedRef.current) return;
     const payload = JSON.stringify(fCanvas.toJSON(['id']));
 
     await updateDoc(roomRef, {
@@ -805,6 +862,7 @@ function WhiteboardInterface({
         isApplyingRemoteRef.current = true;
         fCanvas.loadFromJSON(data.canvasData, () => {
           fCanvas.backgroundColor = nextBg;
+          applyObjectInteractivity();
           fCanvas.renderAll();
           isApplyingRemoteRef.current = false;
           if (undoStackRef.current.length === 0) {
@@ -893,23 +951,20 @@ function WhiteboardInterface({
     if (!fCanvas) return;
 
     const canvas = fCanvas;
-    canvas.isDrawingMode = activeTool === TOOL.DRAW;
-    canvas.selection = activeTool === TOOL.SELECT;
-    canvas.defaultCursor = getCanvasCursor(activeTool);
-    canvas.hoverCursor = activeTool === TOOL.SELECT ? 'move' : getCanvasCursor(activeTool);
+    const canEdit = !isBoardLockedForMe;
+    canvas.isDrawingMode = canEdit && activeTool === TOOL.DRAW;
+    canvas.selection = canEdit && activeTool === TOOL.SELECT;
+    canvas.defaultCursor = canEdit ? getCanvasCursor(activeTool) : 'default';
+    canvas.hoverCursor = canEdit && activeTool === TOOL.SELECT ? 'move' : canvas.defaultCursor;
     canvas.moveCursor = 'move';
 
     if (canvas.upperCanvasEl) {
-      canvas.upperCanvasEl.style.cursor = getCanvasCursor(activeTool);
+      canvas.upperCanvasEl.style.cursor = canvas.defaultCursor;
     }
 
-    canvas.forEachObject((obj) => {
-      obj.selectable = activeTool === TOOL.SELECT;
-      obj.evented = true;
-    });
-
+    applyObjectInteractivity();
     canvas.renderAll();
-  }, [activeTool, fCanvas]);
+  }, [activeTool, fCanvas, isBoardLockedForMe]);
 
   useEffect(() => {
     if (!fCanvas || activeTool === TOOL.SELECT || activeTool === TOOL.DRAW || activeTool === TOOL.HAND || activeTool === TOOL.ERASER || activeTool === TOOL.IMAGE) {
@@ -1052,11 +1107,16 @@ function WhiteboardInterface({
     fCanvas.on('mouse:move', onMouseMove);
     fCanvas.on('mouse:up', onMouseUp);
 
+    const isTypingTarget = (target) =>
+      target instanceof HTMLElement &&
+      (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName));
+
     const onKeyDown = (e) => {
-      if (e.code === 'Space') {
-        e.preventDefault();
-        setIsSpacePressed(true);
-      }
+      if (e.code !== 'Space') return;
+      // Let people type spaces in chat, inputs, and canvas text boxes.
+      if (isTypingTarget(e.target) || fCanvas.getActiveObject()?.isEditing) return;
+      e.preventDefault();
+      setIsSpacePressed(true);
     };
 
     const onKeyUp = (e) => {
@@ -1076,7 +1136,7 @@ function WhiteboardInterface({
   }, [activeTool, fCanvas, isBoardLockedForMe, isSpacePressed, strokeColor, strokeWidth]);
 
   const handleUndo = async () => {
-    if (!fCanvas) return;
+    if (!fCanvas || isBoardLockedForMe) return;
     if (undoStackRef.current.length <= 1) return;
 
     const current = undoStackRef.current.pop();
@@ -1090,7 +1150,7 @@ function WhiteboardInterface({
   };
 
   const handleRedo = async () => {
-    if (!fCanvas) return;
+    if (!fCanvas || isBoardLockedForMe) return;
     if (!redoStackRef.current.length) return;
 
     const next = redoStackRef.current.pop();
@@ -1143,7 +1203,7 @@ function WhiteboardInterface({
   };
 
   const changeBackgroundColor = async (color) => {
-    if (!fCanvas) return;
+    if (!fCanvas || isBoardLockedForMe) return;
     setBackgroundColor(color);
     fCanvas.backgroundColor = color;
     fCanvas.renderAll();
@@ -1165,6 +1225,24 @@ function WhiteboardInterface({
     a.click();
   };
 
+  const exportCanvasPdf = () => {
+    if (!fCanvas) return;
+    try {
+      const snapshot = fCanvas.toCanvasElement();
+      const jpegDataUrl = snapshot.toDataURL('image/jpeg', 0.92);
+      const blob = buildPdfFromJpeg(atob(jpegDataUrl.split(',')[1]), snapshot.width, snapshot.height);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `board-${roomId}.pdf`;
+      a.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (err) {
+      console.error('PDF export failed', err);
+      showNotification('Could not export PDF.');
+    }
+  };
+
   const sendMessage = async (e) => {
     e.preventDefault();
     if (!db || !chatMsg.trim()) return;
@@ -1180,11 +1258,6 @@ function WhiteboardInterface({
   };
 
   const generateSummary = async () => {
-    if (!geminiApiKey) {
-      setAiSummary('AI summary is disabled. Set VITE_GEMINI_API_KEY.');
-      return;
-    }
-
     setIsAiLoading(true);
     try {
       const objects = fCanvas?.getObjects() || [];
@@ -1197,21 +1270,21 @@ function WhiteboardInterface({
         return acc;
       }, {});
 
-      const prompt = `Summarize this collaborative board. Text: ${text || 'None'}. Elements: ${JSON.stringify(counts)}.`;
+      const res = await fetch('/.netlify/functions/summarize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, counts }),
+      });
+      const data = await res.json().catch(() => ({}));
 
-      const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${encodeURIComponent(geminiApiKey)}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
-        },
-      );
+      if (!res.ok) {
+        setAiSummary(data.error || 'Failed to generate summary.');
+        return;
+      }
 
-      const data = await res.json();
-      setAiSummary(data.candidates?.[0]?.content?.parts?.[0]?.text || 'No summary generated.');
+      setAiSummary(data.summary || 'No summary generated.');
     } catch {
-      setAiSummary('Failed to generate summary.');
+      setAiSummary('Failed to generate summary. Check your connection and try again.');
     } finally {
       setIsAiLoading(false);
     }
@@ -1276,6 +1349,9 @@ function WhiteboardInterface({
         </button>
         <button onClick={exportCanvasPng} className="h-8 w-8 grid place-items-center rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800" title="Export PNG">
           <Download size={15} />
+        </button>
+        <button onClick={exportCanvasPdf} className="h-8 w-8 grid place-items-center rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800" title="Export PDF">
+          <FileText size={15} />
         </button>
         <button onClick={onToggleDark} className="h-8 w-8 grid place-items-center rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800" title="Toggle theme">
           {darkMode ? <Sun size={15} /> : <Moon size={15} />}
@@ -1347,7 +1423,7 @@ function WhiteboardInterface({
 
             <div className="h-8 w-px bg-slate-200 dark:bg-slate-700" />
 
-            <button className="h-10 w-10 rounded-xl border border-slate-200 bg-white/90 dark:bg-slate-900/90 dark:border-slate-700 grid place-items-center" onClick={() => setShowBgModal(true)} title="Canvas background">
+            <button className="h-10 w-10 rounded-xl border border-slate-200 bg-white/90 dark:bg-slate-900/90 dark:border-slate-700 grid place-items-center" onClick={() => !isBoardLockedForMe && setShowBgModal(true)} title="Canvas background">
               <Paintbrush size={16} />
             </button>
 
@@ -1440,7 +1516,7 @@ function WhiteboardInterface({
       </AnimatePresence>
 
       <AnimatePresence>
-        {showPanHint && (
+        {showPanHint && !isMobile && (
           <Motion.div
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
@@ -1494,13 +1570,6 @@ function WhiteboardInterface({
                   title="AI summary"
                 >
                   <Sparkles size={14} />
-                </button>
-                <button
-                  onClick={exportCanvasPng}
-                  className="h-8 w-8 rounded-lg grid place-items-center hover:bg-slate-100 dark:hover:bg-slate-800"
-                  title="Export PNG"
-                >
-                  <Upload size={15} />
                 </button>
                 <button
                   onClick={() => setIsCollaborationOpen(false)}

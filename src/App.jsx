@@ -104,6 +104,14 @@ const colorFor = (key = '') => {
   return CURSOR_COLORS[Math.abs(hash) % CURSOR_COLORS.length];
 };
 
+// Stacking order for new items: time-based, plus a counter so items added in
+// the same millisecond keep a stable, shared order on every screen.
+let zCounter = 0;
+const nextZ = () => {
+  zCounter = (zCounter + 1) % 1000;
+  return Date.now() + zCounter / 1000;
+};
+
 const newObjectId = () => `obj-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
 // Shrinks an uploaded image until it fits in one Firestore document.
@@ -1248,7 +1256,7 @@ function WhiteboardInterface({
 
     const assignId = (obj) => {
       if (!obj.id) obj.id = newObjectId();
-      if (obj.z === undefined) obj.z = Date.now() + Math.random();
+      if (obj.z === undefined) obj.z = nextZ();
     };
 
     const onAdded = (e) => {

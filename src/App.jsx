@@ -109,7 +109,7 @@ const ERASER_CURSOR = createCursor(
 );
 
 const COLLAB_PANEL_WIDTH = 320;
-const TOOLBAR_MAX_WIDTH = 640;
+const TOOLBAR_MAX_WIDTH = 720;
 
 // Width left for the floating toolbar (tablet/desktop) so it never covers the
 // collaboration panel.
@@ -707,6 +707,24 @@ function WhiteboardInterface({
     getDefaultToolbarPosition(window.innerWidth, window.innerWidth >= DESKTOP_PANEL_BREAKPOINT),
   );
   const [showExportMenu, setShowExportMenu] = useState(false);
+  const exportMenuRef = useRef(null);
+
+  // Close the export menu when tapping or clicking anywhere else.
+  useEffect(() => {
+    if (!showExportMenu) return undefined;
+    const onPointerDown = (event) => {
+      if (!exportMenuRef.current?.contains(event.target)) setShowExportMenu(false);
+    };
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') setShowExportMenu(false);
+    };
+    document.addEventListener('pointerdown', onPointerDown, true);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown, true);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [showExportMenu]);
   const [isTouchDevice] = useState(isCoarsePointer);
   const toolbarAvailableWidth = getToolbarAvailableWidth(viewport.width, isCollaborationOpen && !isMobile);
   const isMobileSheetOpen = isMobile && isCollaborationOpen;
@@ -1513,7 +1531,7 @@ function WhiteboardInterface({
         <button onClick={handleCopyRoomId} className="h-9 w-9 shrink-0 grid place-items-center rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800" title="Copy room ID" aria-label="Copy room ID">
           <Copy size={15} />
         </button>
-        <div className="relative shrink-0">
+        <div className="relative shrink-0" ref={exportMenuRef}>
           <button
             onClick={() => setShowExportMenu((open) => !open)}
             className="h-9 w-9 grid place-items-center rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800"
@@ -1525,7 +1543,6 @@ function WhiteboardInterface({
           </button>
           {showExportMenu && (
             <>
-              <div className="fixed inset-0 z-10" onClick={() => setShowExportMenu(false)} />
               <div className="absolute right-0 sm:left-0 sm:right-auto top-11 z-20 w-44 rounded-xl border border-slate-200 bg-white p-1 shadow-xl dark:border-slate-700 dark:bg-slate-900">
                 <button
                   onClick={() => {
@@ -1747,9 +1764,8 @@ function WhiteboardInterface({
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: 8 }}
             className={`absolute z-40 rounded-xl border border-slate-200 dark:border-slate-700 bg-white/85 dark:bg-slate-900/85 px-3 py-2 text-xs text-slate-600 dark:text-slate-300 backdrop-blur ${
-              isMobile ? 'left-3 right-3 top-[68px] flex items-center justify-between' : 'right-3 sm:right-6 bottom-3 sm:bottom-6'
+              isMobile ? 'left-3 right-3 top-[68px] flex items-center justify-between' : 'left-6 bottom-[76px] max-w-[min(420px,calc(100vw-3rem))]'
             }`}
-            style={!isMobile && isCollaborationOpen ? { right: COLLAB_PANEL_WIDTH + 36 } : undefined}
           >
             {isTouchDevice
               ? 'Pinch to zoom. Use two fingers to move around.'

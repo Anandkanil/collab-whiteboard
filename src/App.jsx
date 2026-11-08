@@ -7,6 +7,7 @@ import {
   Download,
   Eraser,
   FileText,
+  GripVertical,
   Image as ImageIcon,
   Lock,
   LogOut,
@@ -107,14 +108,29 @@ const ERASER_CURSOR = createCursor(
   22,
 );
 
-const getDefaultToolbarPosition = (viewportWidth, viewportHeight, isMobile) => {
-  const estimatedToolbarWidth = Math.min(isMobile ? viewportWidth - 24 : 620, viewportWidth - 24);
+const COLLAB_PANEL_WIDTH = 320;
+const TOOLBAR_MAX_WIDTH = 640;
+
+// Width left for the floating toolbar (tablet/desktop) so it never covers the
+// collaboration panel.
+const getToolbarAvailableWidth = (viewportWidth, isPanelOpen) =>
+  isPanelOpen ? viewportWidth - COLLAB_PANEL_WIDTH - 36 : viewportWidth;
+
+const getDefaultToolbarPosition = (viewportWidth, isPanelOpen) => {
+  const available = getToolbarAvailableWidth(viewportWidth, isPanelOpen);
+  const estimatedToolbarWidth = Math.min(TOOLBAR_MAX_WIDTH, available - 24);
 
   return {
-    x: Math.max(12, Math.round((viewportWidth - estimatedToolbarWidth) / 2)),
-    y: isMobile ? Math.max(86, viewportHeight - 184) : 70,
+    x: Math.max(12, Math.round((available - estimatedToolbarWidth) / 2)),
+    y: 70,
   };
 };
+
+// Mouse events carry clientX/Y directly; touch events keep them on the touch.
+const getClientPoint = (event) => event?.touches?.[0] || event?.changedTouches?.[0] || event;
+
+const isCoarsePointer = () =>
+  typeof window !== 'undefined' && window.matchMedia?.('(pointer: coarse)').matches;
 
 const getCanvasCursor = (tool) => {
   if (tool === TOOL.ERASER) return ERASER_CURSOR;
@@ -193,7 +209,7 @@ const buildPdfFromJpeg = (jpegBinary, imageWidth, imageHeight) => {
 };
 
 const toolButtonClass = (active) =>
-  `h-10 w-10 rounded-xl border transition-all flex items-center justify-center ${
+  `h-10 w-10 shrink-0 rounded-xl border transition-all flex items-center justify-center ${
     active
       ? 'bg-slate-900 text-white border-slate-900 shadow-md dark:bg-slate-100 dark:text-slate-900 dark:border-slate-100'
       : 'bg-white/90 text-slate-600 border-slate-200 hover:bg-slate-100 dark:bg-slate-900/90 dark:text-slate-200 dark:border-slate-700 dark:hover:bg-slate-800'
@@ -363,6 +379,7 @@ function App() {
           joinRoom={joinRoom}
           darkMode={darkMode}
           onToggleDark={() => setDarkMode((v) => !v)}
+          showNotification={showNotification}
         />
       )}
 
@@ -415,7 +432,35 @@ function LandingPage({
   joinRoom,
   darkMode,
   onToggleDark,
+  showNotification,
 }) {
+  const nameInputRef = useRef(null);
+  const roomInputRef = useRef(null);
+
+  const focusField = (ref) => {
+    ref.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    window.setTimeout(() => ref.current?.focus({ preventScroll: true }), 250);
+  };
+
+  // Hero buttons guide people to the form instead of failing silently.
+  const handleHeroCreate = () => {
+    if (!username.trim()) {
+      focusField(nameInputRef);
+      showNotification('Enter your name to create a board.');
+      return;
+    }
+    createRoom();
+  };
+
+  const handleHeroJoin = () => {
+    if (username.trim() && roomId.trim()) {
+      joinRoom();
+      return;
+    }
+    focusField(username.trim() ? roomInputRef : nameInputRef);
+    showNotification(username.trim() ? 'Enter the room ID you were given.' : 'Enter your name and the room ID to join.');
+  };
+
   const floating = [
     { left: '6%', top: '14%', delay: 0, color: 'bg-amber-200' },
     { left: '14%', top: '76%', delay: 0.25, color: 'bg-rose-200' },
@@ -434,7 +479,7 @@ function LandingPage({
           initial={{ y: 8, opacity: 0 }}
           animate={{ y: [-2, 8, -2], opacity: 0.65 }}
           transition={{ duration: 4.2, repeat: Infinity, delay: dot.delay }}
-          className={`pointer-events-none absolute h-12 w-12 rounded-2xl blur-[0.5px] ${dot.color} dark:opacity-30`}
+          className={`pointer-events-none absolute hidden lg:block h-12 w-12 rounded-2xl blur-[0.5px] ${dot.color} dark:opacity-30`}
           style={{ left: dot.left, top: dot.top }}
         />
       ))}
@@ -450,8 +495,8 @@ function LandingPage({
         </button>
       </header>
 
-      <main className="relative z-20 pointer-events-auto mx-auto max-w-6xl px-6 py-10 lg:py-16 grid lg:grid-cols-[1.05fr_0.95fr] gap-10 items-start">
-        <section className="pt-2">
+      <main className="relative z-20 pointer-events-auto mx-auto max-w-6xl px-4 sm:px-6 py-8 lg:py-16 grid lg:grid-cols-[1.05fr_0.95fr] gap-8 lg:gap-x-10 items-start">
+        <section className="pt-2 lg:col-start-1 lg:row-start-1">
           <Motion.p
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
@@ -487,20 +532,21 @@ function LandingPage({
             className="mt-8 flex flex-wrap gap-3"
           >
             <button
-              onClick={createRoom}
-              className="px-6 py-3 rounded-xl bg-gradient-to-r from-slate-900 to-slate-700 text-white font-semibold hover:from-slate-800 hover:to-slate-700 shadow-lg shadow-slate-300/70 dark:from-slate-100 dark:to-slate-300 dark:text-slate-900 dark:shadow-slate-900/40"
+              onClick={handleHeroCreate}
+              className="flex-1 sm:flex-none px-6 py-3 rounded-xl bg-gradient-to-r from-slate-900 to-slate-700 text-white font-semibold hover:from-slate-800 hover:to-slate-700 shadow-lg shadow-slate-300/70 dark:from-slate-100 dark:to-slate-300 dark:text-slate-900 dark:shadow-slate-900/40"
             >
               Create New Board
             </button>
             <button
-              onClick={joinRoom}
-              className="px-6 py-3 rounded-xl bg-white/90 border border-slate-300 text-slate-800 font-semibold hover:bg-white shadow-sm dark:bg-slate-900/80 dark:border-slate-700 dark:text-slate-100"
+              onClick={handleHeroJoin}
+              className="flex-1 sm:flex-none px-6 py-3 rounded-xl bg-white/90 border border-slate-300 text-slate-800 font-semibold hover:bg-white shadow-sm dark:bg-slate-900/80 dark:border-slate-700 dark:text-slate-100"
             >
               Join Existing Board
             </button>
           </Motion.div>
+        </section>
 
-          <div className="mt-8 grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
+        <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3 lg:col-start-1 lg:row-start-2">
             {[
               ['Real-time collaboration', 'Draw together and see each other\'s changes appear instantly.'],
               ['AI whiteboard summary', 'Generate quick summaries of ideas and next steps.'],
@@ -526,15 +572,14 @@ function LandingPage({
                 <p className="text-xs mt-2 text-slate-600 dark:text-slate-300">{text}</p>
               </Motion.div>
             ))}
-          </div>
-        </section>
+        </div>
 
-        <section className="space-y-4">
+        <section className="space-y-4 lg:col-start-2 lg:row-start-1 lg:row-span-2">
           <Motion.div
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.4, delay: 0.2 }}
-            className="rounded-3xl p-5 bg-white/75 border border-white/95 shadow-xl backdrop-blur dark:bg-slate-900/70 dark:border-slate-700"
+            className="hidden sm:block rounded-3xl p-5 bg-white/75 border border-white/95 shadow-xl backdrop-blur dark:bg-slate-900/70 dark:border-slate-700"
           >
             <div className="rounded-2xl border border-slate-200 dark:border-slate-700 overflow-hidden bg-gradient-to-br from-white to-slate-100 dark:from-slate-900 dark:to-slate-800">
               <div className="h-44 relative">
@@ -554,7 +599,7 @@ function LandingPage({
                   transition={{ duration: 2.7, repeat: Infinity }}
                 />
                 <Motion.div
-                  className="absolute right-16 bottom-8 px-2 py-1 rounded bg-amber-200 text-[10px] font-semibold text-amber-900"
+                  className="absolute right-10 top-20 px-2 py-1 rounded bg-amber-200 text-[10px] font-semibold text-amber-900"
                   animate={{ opacity: [0.5, 1, 0.6] }}
                   transition={{ duration: 1.8, repeat: Infinity }}
                 >
@@ -580,6 +625,7 @@ function LandingPage({
           >
             <p className="text-sm font-semibold">Jump into a room</p>
             <input
+              ref={nameInputRef}
               value={username}
               onChange={(e) => setUsername(e.target.value)}
               placeholder="Your name"
@@ -587,10 +633,12 @@ function LandingPage({
             />
             <div className="flex gap-2">
               <input
+                ref={roomInputRef}
                 value={roomId}
                 onChange={(e) => setRoomId(e.target.value)}
                 placeholder="Room ID"
-                className="flex-1 h-11 rounded-xl px-4 border border-slate-300 bg-white/90 outline-none focus:ring-2 focus:ring-slate-900 dark:bg-slate-900 dark:border-slate-700 dark:focus:ring-slate-100"
+                autoCapitalize="characters"
+                className="min-w-0 flex-1 h-11 rounded-xl px-4 border border-slate-300 bg-white/90 outline-none focus:ring-2 focus:ring-slate-900 dark:bg-slate-900 dark:border-slate-700 dark:focus:ring-slate-100"
               />
               <button type="submit" className="h-11 px-4 rounded-xl bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900">
                 Join
@@ -656,8 +704,12 @@ function WhiteboardInterface({
     () => window.innerWidth >= DESKTOP_PANEL_BREAKPOINT,
   );
   const [toolbarPosition, setToolbarPosition] = useState(() =>
-    getDefaultToolbarPosition(window.innerWidth, window.innerHeight, window.innerWidth < MOBILE_BREAKPOINT),
+    getDefaultToolbarPosition(window.innerWidth, window.innerWidth >= DESKTOP_PANEL_BREAKPOINT),
   );
+  const [showExportMenu, setShowExportMenu] = useState(false);
+  const [isTouchDevice] = useState(isCoarsePointer);
+  const toolbarAvailableWidth = getToolbarAvailableWidth(viewport.width, isCollaborationOpen && !isMobile);
+  const isMobileSheetOpen = isMobile && isCollaborationOpen;
 
   const isApplyingRemoteRef = useRef(false);
   const isApplyingHistoryRef = useRef(false);
@@ -677,7 +729,7 @@ function WhiteboardInterface({
 
   const clampToolbarPosition = (position) => {
     const toolbarWidth = toolbarRef.current?.offsetWidth || Math.min(viewport.width - 24, 620);
-    const toolbarHeight = toolbarRef.current?.offsetHeight || 132;
+    const toolbarHeight = toolbarRef.current?.offsetHeight || 64;
 
     return {
       x: Math.min(Math.max(12, position.x), Math.max(12, viewport.width - toolbarWidth - 12)),
@@ -788,13 +840,13 @@ function WhiteboardInterface({
     setToolbarPosition((current) => {
       if (!toolbarMovedRef.current) {
         return clampToolbarPosition(
-          getDefaultToolbarPosition(viewport.width, viewport.height, isMobile),
+          getDefaultToolbarPosition(viewport.width, isCollaborationOpen && !isMobile),
         );
       }
 
       return clampToolbarPosition(current);
     });
-  }, [isMobile, viewport.height, viewport.width]);
+  }, [isCollaborationOpen, isMobile, viewport.height, viewport.width]);
 
   useEffect(() => {
     const onPointerMove = (event) => {
@@ -960,6 +1012,85 @@ function WhiteboardInterface({
     };
   }, [fCanvas, backgroundColor]);
 
+  // Zoom/pan gestures: pinch + two-finger drag on touch screens,
+  // Ctrl/Cmd + wheel (or trackpad pinch) to zoom and wheel to pan on desktop.
+  useEffect(() => {
+    if (!fCanvas || !window.fabric) return;
+    const fabric = window.fabric;
+    const el = fCanvas.upperCanvasEl;
+    if (!el) return;
+
+    const clampZoom = (value) => Math.max(0.2, Math.min(3, value));
+    const distance = (a, b) => Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+    const midpoint = (a, b) => ({ x: (a.clientX + b.clientX) / 2, y: (a.clientY + b.clientY) / 2 });
+    let gesture = null;
+
+    const onTouchStart = (e) => {
+      if (e.touches.length !== 2) return;
+      e.preventDefault();
+      // Drop any stroke the first finger started before the second one landed.
+      if (fCanvas._isCurrentlyDrawing) {
+        fCanvas._isCurrentlyDrawing = false;
+        fCanvas.clearContext(fCanvas.contextTop);
+      }
+      gesture = {
+        startDistance: distance(e.touches[0], e.touches[1]) || 1,
+        startZoom: fCanvas.getZoom(),
+        lastMid: midpoint(e.touches[0], e.touches[1]),
+        prevDrawingMode: fCanvas.isDrawingMode,
+        prevSelection: fCanvas.selection,
+      };
+      fCanvas.isDrawingMode = false;
+      fCanvas.selection = false;
+    };
+
+    const onTouchMove = (e) => {
+      if (!gesture || e.touches.length !== 2) return;
+      e.preventDefault();
+      const rect = el.getBoundingClientRect();
+      const mid = midpoint(e.touches[0], e.touches[1]);
+      const nextZoom = clampZoom(gesture.startZoom * (distance(e.touches[0], e.touches[1]) / gesture.startDistance));
+      fCanvas.zoomToPoint(new fabric.Point(mid.x - rect.left, mid.y - rect.top), nextZoom);
+      fCanvas.relativePan(new fabric.Point(mid.x - gesture.lastMid.x, mid.y - gesture.lastMid.y));
+      gesture.lastMid = mid;
+      setZoom(Number(nextZoom.toFixed(2)));
+    };
+
+    const onTouchEnd = (e) => {
+      if (!gesture || e.touches.length > 0) return;
+      fCanvas.isDrawingMode = gesture.prevDrawingMode;
+      fCanvas.selection = gesture.prevSelection;
+      gesture = null;
+    };
+
+    const onWheel = (opt) => {
+      const e = opt.e;
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.ctrlKey || e.metaKey) {
+        const nextZoom = clampZoom(fCanvas.getZoom() * 0.99 ** e.deltaY);
+        fCanvas.zoomToPoint(new fabric.Point(e.offsetX, e.offsetY), nextZoom);
+        setZoom(Number(nextZoom.toFixed(2)));
+      } else {
+        fCanvas.relativePan(new fabric.Point(-e.deltaX, -e.deltaY));
+      }
+    };
+
+    el.addEventListener('touchstart', onTouchStart, { passive: false });
+    el.addEventListener('touchmove', onTouchMove, { passive: false });
+    el.addEventListener('touchend', onTouchEnd);
+    el.addEventListener('touchcancel', onTouchEnd);
+    fCanvas.on('mouse:wheel', onWheel);
+
+    return () => {
+      el.removeEventListener('touchstart', onTouchStart);
+      el.removeEventListener('touchmove', onTouchMove);
+      el.removeEventListener('touchend', onTouchEnd);
+      el.removeEventListener('touchcancel', onTouchEnd);
+      fCanvas.off('mouse:wheel', onWheel);
+    };
+  }, [fCanvas]);
+
   useEffect(() => {
     if (!fCanvas) return;
     fCanvas.freeDrawingBrush.color = strokeColor;
@@ -1031,8 +1162,9 @@ function WhiteboardInterface({
 
       if (handLikePan) {
         panRef.current.isDragging = true;
-        panRef.current.lastX = event.clientX;
-        panRef.current.lastY = event.clientY;
+        const point = getClientPoint(event);
+        panRef.current.lastX = point.clientX;
+        panRef.current.lastY = point.clientY;
         panRef.current.prevSelection = fCanvas.selection;
         panRef.current.prevDrawingMode = fCanvas.isDrawingMode;
         fCanvas.selection = false;
@@ -1105,7 +1237,7 @@ function WhiteboardInterface({
 
     const onMouseMove = (opt) => {
       if (!panRef.current.isDragging) return;
-      const e = opt.e;
+      const e = getClientPoint(opt.e);
       const vpt = fCanvas.viewportTransform;
       vpt[4] += e.clientX - panRef.current.lastX;
       vpt[5] += e.clientY - panRef.current.lastY;
@@ -1369,145 +1501,201 @@ function WhiteboardInterface({
         <canvas ref={canvasRef} />
       </main>
 
-      <div className="absolute top-3 left-3 right-3 sm:left-6 sm:right-auto z-50 rounded-2xl border border-slate-200 bg-white/90 dark:bg-slate-900/90 dark:border-slate-700 backdrop-blur px-3 py-2 flex max-w-[calc(100vw-1.5rem)] flex-wrap items-center gap-2 shadow-md sm:max-w-none">
-        <button onClick={onExit} className="h-8 w-8 grid place-items-center rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800" title="Exit board">
+      <div className="absolute top-3 left-3 right-3 sm:left-6 sm:right-auto z-50 rounded-2xl border border-slate-200 bg-white/90 dark:bg-slate-900/90 dark:border-slate-700 backdrop-blur px-2 sm:px-3 py-2 flex items-center gap-1 sm:gap-2 shadow-md">
+        <button onClick={onExit} className="h-9 w-9 shrink-0 grid place-items-center rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800" title="Exit board" aria-label="Exit board">
           <LogOut size={16} />
         </button>
-        <div className="h-6 w-px bg-slate-200 dark:bg-slate-700" />
-        <div className="min-w-0 flex-1 sm:flex-none">
-          <p className="text-xs font-semibold">Room {roomId}</p>
-          <p className="text-[11px] text-slate-500 dark:text-slate-400">{roomData?.participants?.length || 1} online</p>
+        <div className="h-6 w-px shrink-0 bg-slate-200 dark:bg-slate-700" />
+        <div className="min-w-0 flex-1 sm:flex-none px-1">
+          <p className="text-xs font-semibold whitespace-nowrap truncate">Room {roomId}</p>
+          <p className="text-[11px] whitespace-nowrap text-slate-500 dark:text-slate-400">{roomData?.participants?.length || 1} joined</p>
         </div>
-        <button onClick={handleCopyRoomId} className="h-8 w-8 grid place-items-center rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800" title="Copy room ID">
+        <button onClick={handleCopyRoomId} className="h-9 w-9 shrink-0 grid place-items-center rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800" title="Copy room ID" aria-label="Copy room ID">
           <Copy size={15} />
         </button>
-        <button onClick={exportCanvasPng} className="h-8 w-8 grid place-items-center rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800" title="Export PNG">
-          <Download size={15} />
-        </button>
-        <button onClick={exportCanvasPdf} className="h-8 w-8 grid place-items-center rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800" title="Export PDF">
-          <FileText size={15} />
-        </button>
-        <button onClick={onToggleDark} className="h-8 w-8 grid place-items-center rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800" title="Toggle theme">
+        <div className="relative shrink-0">
+          <button
+            onClick={() => setShowExportMenu((open) => !open)}
+            className="h-9 w-9 grid place-items-center rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800"
+            title="Export board"
+            aria-label="Export board"
+            aria-expanded={showExportMenu}
+          >
+            <Download size={15} />
+          </button>
+          {showExportMenu && (
+            <>
+              <div className="fixed inset-0 z-10" onClick={() => setShowExportMenu(false)} />
+              <div className="absolute right-0 sm:left-0 sm:right-auto top-11 z-20 w-44 rounded-xl border border-slate-200 bg-white p-1 shadow-xl dark:border-slate-700 dark:bg-slate-900">
+                <button
+                  onClick={() => {
+                    setShowExportMenu(false);
+                    exportCanvasPng();
+                  }}
+                  className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm hover:bg-slate-100 dark:hover:bg-slate-800"
+                >
+                  <ImageIcon size={15} /> PNG image
+                </button>
+                <button
+                  onClick={() => {
+                    setShowExportMenu(false);
+                    exportCanvasPdf();
+                  }}
+                  className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm hover:bg-slate-100 dark:hover:bg-slate-800"
+                >
+                  <FileText size={15} /> PDF document
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+        <button onClick={onToggleDark} className="h-9 w-9 shrink-0 grid place-items-center rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800" title="Toggle theme" aria-label="Toggle theme">
           {darkMode ? <Sun size={15} /> : <Moon size={15} />}
         </button>
         <button
           onClick={() => setIsCollaborationOpen((current) => !current)}
-          className="h-8 rounded-lg border border-slate-300 dark:border-slate-600 px-2 text-xs font-medium hover:bg-slate-100 dark:hover:bg-slate-800"
-          title="Toggle collaboration panel"
+          className={`h-9 shrink-0 rounded-lg border px-2 text-xs font-medium flex items-center gap-1.5 ${
+            isCollaborationOpen
+              ? 'border-slate-900 bg-slate-900 text-white dark:border-slate-100 dark:bg-slate-100 dark:text-slate-900'
+              : 'border-slate-300 hover:bg-slate-100 dark:border-slate-600 dark:hover:bg-slate-800'
+          }`}
+          title={isCollaborationOpen ? 'Hide chat & people' : 'Show chat & people'}
+          aria-label={isCollaborationOpen ? 'Hide chat and people' : 'Show chat and people'}
         >
-          {isCollaborationOpen ? 'Hide collab' : 'Show collab'}
+          <MessageSquare size={14} />
+          <span className="hidden sm:inline">{isCollaborationOpen ? 'Hide chat' : 'Chat & people'}</span>
         </button>
         {isCurrentHost && (
           <button
             onClick={toggleLock}
-            className="h-8 px-2 rounded-lg border border-slate-300 dark:border-slate-600 text-xs hover:bg-slate-100 dark:hover:bg-slate-800"
+            className={`h-9 shrink-0 px-2 rounded-lg border text-xs flex items-center gap-1.5 ${
+              roomData?.isLocked
+                ? 'border-amber-400 bg-amber-50 text-amber-700 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-200'
+                : 'border-slate-300 hover:bg-slate-100 dark:border-slate-600 dark:hover:bg-slate-800'
+            }`}
             title={roomData?.isLocked ? 'Unlock the board for collaborators' : 'Lock the board so only the host can edit'}
+            aria-label={roomData?.isLocked ? 'Unlock board' : 'Lock board'}
           >
-            {roomData?.isLocked ? 'Unlock' : 'Lock'}
+            <Lock size={14} />
+            <span className="hidden sm:inline">{roomData?.isLocked ? 'Unlock' : 'Lock'}</span>
           </button>
         )}
-        {roomData?.isLocked && <Lock size={14} className="text-amber-500" title={isCurrentHost ? 'Board is locked for collaborators' : 'Board is locked by the host'} />}
+        {roomData?.isLocked && !isCurrentHost && (
+          <Lock size={14} className="shrink-0 text-amber-500" title="Board is locked by the host" />
+        )}
       </div>
 
-      <div
-        className="absolute z-[120] pointer-events-none"
-        style={{ left: toolbarPosition.x, top: toolbarPosition.y }}
-      >
-        <Motion.div
-          ref={toolbarRef}
-          initial={{ opacity: 0, y: -8 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="pointer-events-auto w-[min(620px,calc(100vw-1.5rem))] rounded-2xl border border-slate-300 bg-white/95 dark:bg-slate-900/95 dark:border-slate-600 backdrop-blur px-2 py-2 shadow-2xl"
+      {!isMobileSheetOpen && (
+        <div
+          className={isMobile ? 'absolute left-3 right-3 bottom-3 z-[60]' : 'absolute z-[60] pointer-events-none'}
+          style={isMobile ? undefined : { left: toolbarPosition.x, top: toolbarPosition.y }}
         >
-          <div className="mb-2 flex items-center justify-between gap-3 px-1">
-            <button
-              type="button"
-              onPointerDown={startToolbarDrag}
-              className="flex h-9 items-center gap-2 rounded-xl border border-slate-300 dark:border-slate-600 px-3 text-xs font-medium text-slate-600 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 touch-none"
-              title="Drag toolbar"
-            >
-              <Move size={14} />
-              Drag toolbar
-            </button>
-            <p className="text-[11px] text-slate-500 dark:text-slate-400">
-              {isMobile ? 'Move it anywhere that stays out of the way.' : 'Reposition the toolbar wherever it fits your board.'}
-            </p>
-          </div>
-
-          <div className="flex items-center gap-2 overflow-x-auto pb-1">
-            {toolItems.map((tool) => (
-              <Motion.button
-                whileHover={{ scale: 1.06 }}
-                whileTap={{ scale: 0.96 }}
-                key={tool.id}
-                className={toolButtonClass(activeTool === tool.id)}
-                onClick={() => {
-                  if (isBoardLockedForMe && tool.id !== TOOL.HAND && tool.id !== TOOL.SELECT) {
-                    notifyBoardLocked();
-                    return;
-                  }
-                  if (tool.id === TOOL.IMAGE) {
-                    handleUploadImage();
-                    return;
-                  }
-                  setActiveTool(tool.id);
-                }}
-                title={tool.label}
-              >
-                {tool.icon}
-              </Motion.button>
-            ))}
-
-            <div className="h-8 w-px bg-slate-200 dark:bg-slate-700" />
-
-            <button className="h-10 w-10 rounded-xl border border-slate-200 bg-white/90 dark:bg-slate-900/90 dark:border-slate-700 grid place-items-center" onClick={() => (isBoardLockedForMe ? notifyBoardLocked() : setShowBgModal(true))} title="Canvas background">
-              <Paintbrush size={16} />
-            </button>
-
-            <input
-              type="color"
-              value={strokeColor}
-              onChange={(e) => setStrokeColor(e.target.value)}
-              className="h-10 w-10 rounded-xl border border-slate-200 dark:border-slate-700 bg-transparent p-1"
-              title="Stroke color"
-            />
-
-            <select
-              className="h-10 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 text-sm"
-              value={strokeWidth}
-              onChange={(e) => setStrokeWidth(Number(e.target.value))}
-              title="Stroke width"
-            >
-              {[1, 2, 3, 4, 6, 8].map((w) => (
-                <option key={w} value={w}>{w}px</option>
+          <Motion.div
+            ref={toolbarRef}
+            initial={{ opacity: 0, y: isMobile ? 8 : -8 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="pointer-events-auto rounded-2xl border border-slate-300 bg-white/95 dark:bg-slate-900/95 dark:border-slate-600 backdrop-blur p-2 shadow-2xl"
+            style={isMobile ? undefined : { width: 'max-content', maxWidth: Math.min(TOOLBAR_MAX_WIDTH, toolbarAvailableWidth - 24) }}
+          >
+            <div className={`flex items-center gap-1.5 ${isMobile ? 'overflow-x-auto' : 'flex-wrap'}`}>
+              {!isMobile && (
+                <button
+                  type="button"
+                  onPointerDown={startToolbarDrag}
+                  className="h-10 w-6 shrink-0 grid place-items-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-slate-800 dark:hover:text-slate-200 cursor-grab active:cursor-grabbing touch-none"
+                  title="Drag to move the toolbar"
+                  aria-label="Drag to move the toolbar"
+                >
+                  <GripVertical size={16} />
+                </button>
+              )}
+              {toolItems.map((tool) => (
+                <Motion.button
+                  whileHover={{ scale: 1.06 }}
+                  whileTap={{ scale: 0.96 }}
+                  key={tool.id}
+                  className={toolButtonClass(activeTool === tool.id)}
+                  onClick={() => {
+                    if (isBoardLockedForMe && tool.id !== TOOL.HAND && tool.id !== TOOL.SELECT) {
+                      notifyBoardLocked();
+                      return;
+                    }
+                    if (tool.id === TOOL.IMAGE) {
+                      handleUploadImage();
+                      return;
+                    }
+                    setActiveTool(tool.id);
+                  }}
+                  title={tool.label}
+                  aria-label={tool.label}
+                  aria-pressed={activeTool === tool.id}
+                >
+                  {tool.icon}
+                </Motion.button>
               ))}
-            </select>
-          </div>
-        </Motion.div>
-      </div>
 
-      <div className="absolute left-3 bottom-20 sm:left-6 sm:bottom-auto sm:top-1/2 sm:-translate-y-1/2 z-50">
-        <div className="rounded-2xl border border-slate-200 dark:border-slate-700 bg-white/70 dark:bg-slate-900/70 backdrop-blur px-2 py-2 flex flex-row gap-2 shadow-xl sm:flex-col">
-          <Motion.button whileHover={{ scale: 1.06 }} whileTap={{ scale: 0.95 }} onClick={handleUndo} className={toolButtonClass(false)} title="Undo">
+              <div className="h-8 w-px shrink-0 bg-slate-200 dark:bg-slate-700" />
+
+              <button className="h-10 w-10 shrink-0 rounded-xl border border-slate-200 bg-white/90 dark:bg-slate-900/90 dark:border-slate-700 grid place-items-center" onClick={() => (isBoardLockedForMe ? notifyBoardLocked() : setShowBgModal(true))} title="Canvas background" aria-label="Canvas background">
+                <Paintbrush size={16} />
+              </button>
+
+              <input
+                type="color"
+                value={strokeColor}
+                onChange={(e) => setStrokeColor(e.target.value)}
+                className="h-10 w-10 shrink-0 rounded-xl border border-slate-200 dark:border-slate-700 bg-transparent p-1"
+                title="Stroke color"
+                aria-label="Stroke color"
+              />
+
+              <select
+                className="h-10 shrink-0 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 text-sm"
+                value={strokeWidth}
+                onChange={(e) => setStrokeWidth(Number(e.target.value))}
+                title="Stroke width"
+                aria-label="Stroke width"
+              >
+                {[1, 2, 3, 4, 6, 8].map((w) => (
+                  <option key={w} value={w}>{w}px</option>
+                ))}
+              </select>
+            </div>
+          </Motion.div>
+        </div>
+      )}
+
+      <div className="hidden sm:block absolute left-6 top-1/2 -translate-y-1/2 z-50">
+        <div className="rounded-2xl border border-slate-200 dark:border-slate-700 bg-white/70 dark:bg-slate-900/70 backdrop-blur p-2 flex flex-col gap-2 shadow-xl">
+          <Motion.button whileHover={{ scale: 1.06 }} whileTap={{ scale: 0.95 }} onClick={handleUndo} className={toolButtonClass(false)} title="Undo" aria-label="Undo">
             <Undo2 size={16} />
           </Motion.button>
-          <Motion.button whileHover={{ scale: 1.06 }} whileTap={{ scale: 0.95 }} onClick={handleRedo} className={toolButtonClass(false)} title="Redo">
+          <Motion.button whileHover={{ scale: 1.06 }} whileTap={{ scale: 0.95 }} onClick={handleRedo} className={toolButtonClass(false)} title="Redo" aria-label="Redo">
             <Redo2 size={16} />
           </Motion.button>
         </div>
       </div>
 
-      <div className="absolute left-3 bottom-3 sm:left-6 sm:bottom-6 z-50 rounded-2xl border border-slate-200 dark:border-slate-700 bg-white/75 dark:bg-slate-900/75 backdrop-blur px-3 py-2 shadow-xl flex items-center gap-2 max-w-[calc(100vw-6rem)]">
-        <button onClick={() => setZoomLevel(zoom - 0.1)} className="h-8 w-8 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 grid place-items-center" title="Zoom out">
-          <Minus size={14} />
-        </button>
-        <button onClick={resetZoom} className="px-2 h-8 rounded-lg text-xs border border-slate-300 dark:border-slate-600" title="Reset zoom">
-          {Math.round(zoom * 100)}%
-        </button>
-        <button onClick={() => setZoomLevel(zoom + 0.1)} className="h-8 w-8 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 grid place-items-center" title="Zoom in">
-          <Plus size={14} />
-        </button>
-      </div>
+      {!isMobileSheetOpen && (
+        <div className="absolute left-3 bottom-[84px] sm:left-6 sm:bottom-6 z-50 rounded-2xl border border-slate-200 dark:border-slate-700 bg-white/85 dark:bg-slate-900/85 backdrop-blur px-2 py-1.5 shadow-xl flex items-center gap-1">
+          <button onClick={handleUndo} className="sm:hidden h-9 w-9 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 grid place-items-center" title="Undo" aria-label="Undo">
+            <Undo2 size={15} />
+          </button>
+          <button onClick={handleRedo} className="sm:hidden h-9 w-9 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 grid place-items-center" title="Redo" aria-label="Redo">
+            <Redo2 size={15} />
+          </button>
+          <div className="sm:hidden h-6 w-px bg-slate-200 dark:bg-slate-700 mx-0.5" />
+          <button onClick={() => setZoomLevel(zoom - 0.1)} className="h-9 w-9 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 grid place-items-center" title="Zoom out" aria-label="Zoom out">
+            <Minus size={14} />
+          </button>
+          <button onClick={resetZoom} className="px-2 h-8 min-w-[52px] rounded-lg text-xs border border-slate-300 dark:border-slate-600" title="Reset zoom" aria-label="Reset zoom">
+            {Math.round(zoom * 100)}%
+          </button>
+          <button onClick={() => setZoomLevel(zoom + 0.1)} className="h-9 w-9 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 grid place-items-center" title="Zoom in" aria-label="Zoom in">
+            <Plus size={14} />
+          </button>
+        </div>
+      )}
 
       <AnimatePresence>
         {showBgModal && (
@@ -1553,16 +1741,20 @@ function WhiteboardInterface({
       </AnimatePresence>
 
       <AnimatePresence>
-        {showPanHint && !isMobile && (
+        {showPanHint && !isMobileSheetOpen && (
           <Motion.div
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: 8 }}
-            className="absolute right-3 sm:right-6 bottom-3 sm:bottom-6 z-40 rounded-xl border border-slate-200 dark:border-slate-700 bg-white/75 dark:bg-slate-900/75 px-3 py-2 text-xs text-slate-600 dark:text-slate-300 backdrop-blur"
-            style={{ bottom: isMobile && isCollaborationOpen ? Math.min(viewport.height * 0.6, 420) + 20 : undefined }}
+            className={`absolute z-40 rounded-xl border border-slate-200 dark:border-slate-700 bg-white/85 dark:bg-slate-900/85 px-3 py-2 text-xs text-slate-600 dark:text-slate-300 backdrop-blur ${
+              isMobile ? 'left-3 right-3 top-[68px] flex items-center justify-between' : 'right-3 sm:right-6 bottom-3 sm:bottom-6'
+            }`}
+            style={!isMobile && isCollaborationOpen ? { right: COLLAB_PANEL_WIDTH + 36 } : undefined}
           >
-            To move canvas, hold Space while dragging.
-            <button onClick={() => setShowPanHint(false)} className="ml-2 text-slate-500">Hide</button>
+            {isTouchDevice
+              ? 'Pinch to zoom. Use two fingers to move around.'
+              : 'To move the canvas, hold Space while dragging. Ctrl + scroll to zoom.'}
+            <button onClick={() => setShowPanHint(false)} className="ml-2 font-medium text-slate-500 hover:text-slate-800 dark:hover:text-slate-100">Got it</button>
           </Motion.div>
         )}
       </AnimatePresence>
@@ -1573,18 +1765,16 @@ function WhiteboardInterface({
             initial={isMobile ? { opacity: 0, y: 24 } : { opacity: 0, x: 24 }}
             animate={{ opacity: 1, x: 0, y: 0 }}
             exit={isMobile ? { opacity: 0, y: 24 } : { opacity: 0, x: 24 }}
-            className={`absolute z-50 overflow-hidden rounded-2xl border border-slate-200 bg-white/80 shadow-xl backdrop-blur dark:border-slate-700 dark:bg-slate-900/80 ${
+            className={`absolute z-[70] overflow-hidden rounded-2xl border border-slate-200 bg-white/80 shadow-xl backdrop-blur dark:border-slate-700 dark:bg-slate-900/80 ${
               isMobile
-                ? 'left-3 right-3 bottom-3 h-[min(60vh,420px)]'
-                : 'top-16 right-3 bottom-16 w-[320px] max-w-[90vw] sm:right-6 sm:bottom-6'
+                ? 'left-3 right-3 bottom-3 h-[min(65vh,460px)]'
+                : 'top-[76px] right-3 bottom-3 w-[320px] max-w-[90vw] sm:right-6 sm:bottom-6'
             } flex flex-col`}
           >
             <div className="px-4 py-3 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between gap-3">
               <div>
                 <p className="text-sm font-semibold">Collaboration</p>
-                <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                  {isMobile ? 'Chat, people, and AI tools in one sheet.' : 'Chat, participants, and AI summary.'}
-                </p>
+                <p className="hidden sm:block text-[11px] text-slate-500 dark:text-slate-400">Chat, participants, and AI summary.</p>
               </div>
               <div className="flex items-center gap-2">
                 <button

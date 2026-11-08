@@ -533,46 +533,18 @@ function LandingPage({
           >
             <button
               onClick={handleHeroCreate}
-              className="flex-1 sm:flex-none px-6 py-3 rounded-xl bg-gradient-to-r from-slate-900 to-slate-700 text-white font-semibold hover:from-slate-800 hover:to-slate-700 shadow-lg shadow-slate-300/70 dark:from-slate-100 dark:to-slate-300 dark:text-slate-900 dark:shadow-slate-900/40"
+              className="flex-1 sm:flex-none whitespace-nowrap text-sm sm:text-base px-4 sm:px-6 py-3 rounded-xl bg-gradient-to-r from-slate-900 to-slate-700 text-white font-semibold hover:from-slate-800 hover:to-slate-700 shadow-lg shadow-slate-300/70 dark:from-slate-100 dark:to-slate-300 dark:text-slate-900 dark:shadow-slate-900/40"
             >
               Create New Board
             </button>
             <button
               onClick={handleHeroJoin}
-              className="flex-1 sm:flex-none px-6 py-3 rounded-xl bg-white/90 border border-slate-300 text-slate-800 font-semibold hover:bg-white shadow-sm dark:bg-slate-900/80 dark:border-slate-700 dark:text-slate-100"
+              className="flex-1 sm:flex-none whitespace-nowrap text-sm sm:text-base px-4 sm:px-6 py-3 rounded-xl bg-white/90 border border-slate-300 text-slate-800 font-semibold hover:bg-white shadow-sm dark:bg-slate-900/80 dark:border-slate-700 dark:text-slate-100"
             >
               Join Existing Board
             </button>
           </Motion.div>
         </section>
-
-        <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3 lg:col-start-1 lg:row-start-2">
-            {[
-              ['Real-time collaboration', 'Draw together and see each other\'s changes appear instantly.'],
-              ['AI whiteboard summary', 'Generate quick summaries of ideas and next steps.'],
-              ['Undo & redo', 'Step back and forward through your changes while you work.'],
-              ['Export to PNG or PDF', 'Download snapshots for documentation and handoff.'],
-              ['Live chat', 'Keep board discussion in context.'],
-              ['Live cursors', 'See where everyone is pointing on the board.', true],
-              ['Version history', 'Return to earlier versions of a board anytime.', true],
-            ].map(([title, text, comingSoon]) => (
-              <Motion.div
-                key={title}
-                whileHover={{ y: -3 }}
-                className={`rounded-2xl p-4 bg-white/65 border border-white/90 shadow-md backdrop-blur dark:bg-slate-900/60 dark:border-slate-700 ${comingSoon ? 'opacity-75' : ''}`}
-              >
-                <p className="font-semibold text-sm flex flex-wrap items-center gap-2">
-                  {title}
-                  {comingSoon && (
-                    <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-700 dark:bg-amber-950/60 dark:text-amber-200">
-                      Coming soon
-                    </span>
-                  )}
-                </p>
-                <p className="text-xs mt-2 text-slate-600 dark:text-slate-300">{text}</p>
-              </Motion.div>
-            ))}
-        </div>
 
         <section className="space-y-4 lg:col-start-2 lg:row-start-1 lg:row-span-2">
           <Motion.div
@@ -653,6 +625,34 @@ function LandingPage({
             </button>
           </Motion.form>
         </section>
+
+        <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3 lg:col-start-1 lg:row-start-2">
+            {[
+              ['Real-time collaboration', 'Draw together and see each other\'s changes appear instantly.'],
+              ['AI whiteboard summary', 'Generate quick summaries of ideas and next steps.'],
+              ['Undo & redo', 'Step back and forward through your changes while you work.'],
+              ['Export to PNG or PDF', 'Download snapshots for documentation and handoff.'],
+              ['Live chat', 'Keep board discussion in context.'],
+              ['Live cursors', 'See where everyone is pointing on the board.', true],
+              ['Version history', 'Return to earlier versions of a board anytime.', true],
+            ].map(([title, text, comingSoon]) => (
+              <Motion.div
+                key={title}
+                whileHover={{ y: -3 }}
+                className={`rounded-2xl p-4 bg-white/65 border border-white/90 shadow-md backdrop-blur dark:bg-slate-900/60 dark:border-slate-700 ${comingSoon ? 'opacity-75' : ''}`}
+              >
+                <p className="font-semibold text-sm flex flex-wrap items-center gap-2">
+                  {title}
+                  {comingSoon && (
+                    <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-700 dark:bg-amber-950/60 dark:text-amber-200">
+                      Coming soon
+                    </span>
+                  )}
+                </p>
+                <p className="text-xs mt-2 text-slate-600 dark:text-slate-300">{text}</p>
+              </Motion.div>
+            ))}
+        </div>
       </main>
     </div>
   );

@@ -6,6 +6,14 @@ service cloud.firestore {
   match /databases/{database}/documents {
 
     match /artifacts/{appId}/public/data/rooms/{roomId} {
+      // The host can always edit; everyone else only while the board is unlocked.
+      // (One room lookup per check.)
+      function canEditBoard() {
+        let r = get(/databases/$(database)/documents/artifacts/$(appId)/public/data/rooms/$(roomId)).data;
+        return request.auth != null
+          && (r.hostId == request.auth.uid || r.get('isLocked', false) == false);
+      }
+
       // Anyone signed in to the app (anonymous sign-in) can view a board.
       allow read: if request.auth != null;
 
@@ -25,6 +33,25 @@ service cloud.firestore {
       );
 
       allow delete: if false;
+
+      // Each drawing item on the board is its own document.
+      match /objects/{objectId} {
+        allow read: if request.auth != null;
+        allow create, update: if canEditBoard()
+          && request.resource.data.data is string
+          && request.resource.data.data.size() <= 950000;
+        allow delete: if canEditBoard();
+      }
+
+      // Saved versions of the board (version history).
+      match /versions/{versionId} {
+        allow read: if request.auth != null;
+        allow create: if canEditBoard()
+          && request.resource.data.createdByUid == request.auth.uid
+          && request.resource.data.objects is string
+          && request.resource.data.objects.size() <= 950000;
+        allow update, delete: if false;
+      }
 
       // Live chat messages for a board.
       match /chat/{messageId} {

@@ -1,0 +1,18 @@
+{
+  "rules": {
+    "rooms": {
+      "$appId": {
+        "$roomId": {
+          "cursors": {
+            ".read": "auth != null",
+            "$clientId": { ".write": "auth != null" }
+          },
+          "presence": {
+            ".read": "auth != null",
+            "$clientId": { ".write": "auth != null" }
+          }
+        }
+      }
+    }
+  }
+}

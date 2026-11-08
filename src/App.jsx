@@ -6,6 +6,7 @@ import {
   Copy,
   Download,
   Eraser,
+  History,
   FileText,
   GripVertical,
   Image as ImageIcon,
@@ -32,17 +33,28 @@ import {
 import { AnimatePresence, motion as Motion } from 'framer-motion';
 import { initializeApp } from 'firebase/app';
 import {
+  addDoc,
   arrayUnion,
   collection,
   doc,
   getDoc,
   getFirestore,
+  limit,
   onSnapshot,
   orderBy,
   query,
   setDoc,
   updateDoc,
+  writeBatch,
 } from 'firebase/firestore';
+import {
+  getDatabase,
+  onDisconnect,
+  onValue,
+  ref as rtdbRef,
+  remove as rtdbRemove,
+  set as rtdbSet,
+} from 'firebase/database';
 import {
   getAuth,
   onAuthStateChanged,
@@ -59,15 +71,81 @@ const firebaseConfig = {
   appId: import.meta.env.VITE_FIREBASE_APP_ID,
   measurementId: import.meta.env.VITE_FIREBASE_MEASUREMENT_ID,
 };
+// Optional: enables live cursors and the live "online" count.
+const databaseURL = import.meta.env.VITE_FIREBASE_DATABASE_URL;
 
 const isFirebaseConfigured = Object.values(firebaseConfig).every(Boolean);
 const appId =
   import.meta.env.VITE_APP_ID ||
   (typeof __app_id !== 'undefined' ? __app_id : 'collab-whiteboard-v2');
 
-const app = isFirebaseConfigured ? initializeApp(firebaseConfig) : null;
+const app = isFirebaseConfigured
+  ? initializeApp(databaseURL ? { ...firebaseConfig, databaseURL } : firebaseConfig)
+  : null;
 const db = app ? getFirestore(app) : null;
 const auth = app ? getAuth(app) : null;
+let rtdb = null;
+try {
+  rtdb = app && databaseURL ? getDatabase(app) : null;
+} catch (err) {
+  console.error('Realtime Database unavailable', err);
+}
+
+// Each drawing item is stored as its own Firestore document, which has a
+// 1 MB limit. Keep a margin for the other fields.
+const MAX_OBJECT_CHARS = 900000;
+const AUTO_VERSION_INTERVAL_MS = 10 * 60 * 1000;
+const CURSOR_SEND_INTERVAL_MS = 60;
+const CURSOR_COLORS = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6', '#ec4899'];
+
+const colorFor = (key = '') => {
+  let hash = 0;
+  for (let i = 0; i < key.length; i += 1) hash = (hash * 31 + key.charCodeAt(i)) | 0;
+  return CURSOR_COLORS[Math.abs(hash) % CURSOR_COLORS.length];
+};
+
+const newObjectId = () => `obj-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+
+// Shrinks an uploaded image until it fits in one Firestore document.
+const compressImageFile = (file) =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('read-failed'));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error('decode-failed'));
+      img.onload = () => {
+        let maxSide = 1600;
+        for (let attempt = 0; attempt < 6; attempt += 1) {
+          const scale = Math.min(1, maxSide / Math.max(img.width, img.height));
+          const canvas = document.createElement('canvas');
+          canvas.width = Math.max(1, Math.round(img.width * scale));
+          canvas.height = Math.max(1, Math.round(img.height * scale));
+          canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+          let url = canvas.toDataURL('image/webp', 0.8);
+          if (!url.startsWith('data:image/webp')) url = canvas.toDataURL('image/jpeg', 0.8);
+          if (url.length < MAX_OBJECT_CHARS - 20000) {
+            resolve(url);
+            return;
+          }
+          maxSide = Math.round(maxSide * 0.7);
+        }
+        reject(new Error('too-large'));
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+
+const timeAgo = (timestamp) => {
+  const seconds = Math.round((Date.now() - timestamp) / 1000);
+  if (seconds < 60) return 'just now';
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours} h ago`;
+  return new Date(timestamp).toLocaleString();
+};
 
 const DEFAULT_STROKE = '#000000';
 const DEFAULT_STROKE_WIDTH = 2;
@@ -284,7 +362,6 @@ function App() {
         hostName: username.trim(),
         createdAt: Date.now(),
         isLocked: false,
-        canvasData: JSON.stringify({ objects: [], version: '5.3.0' }),
         canvasSettings: {
           backgroundColor: DEFAULT_BACKGROUND,
         },
@@ -628,13 +705,13 @@ function LandingPage({
 
         <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3 lg:col-start-1 lg:row-start-2">
             {[
-              ['Real-time collaboration', 'Draw together and see each other\'s changes appear instantly.'],
+              ['Real-time collaboration', 'Draw together at the same time without overwriting each other.'],
               ['AI whiteboard summary', 'Generate quick summaries of ideas and next steps.'],
-              ['Undo & redo', 'Step back and forward through your changes while you work.'],
+              ['Undo & redo', 'Step back and forward through your own changes while you work.'],
               ['Export to PNG or PDF', 'Download snapshots for documentation and handoff.'],
               ['Live chat', 'Keep board discussion in context.'],
-              ['Live cursors', 'See where everyone is pointing on the board.', true],
-              ['Version history', 'Return to earlier versions of a board anytime.', true],
+              ['Live cursors', 'See where everyone is pointing on the board.', !databaseURL],
+              ['Version history', 'Save versions and restore an earlier board anytime.'],
             ].map(([title, text, comingSoon]) => (
               <Motion.div
                 key={title}
@@ -695,6 +772,12 @@ function WhiteboardInterface({
   const [aiSummary, setAiSummary] = useState('');
   const [isAiLoading, setIsAiLoading] = useState(false);
   const [activePanel, setActivePanel] = useState('chat');
+  const [versions, setVersions] = useState([]);
+  const [isSavingVersion, setIsSavingVersion] = useState(false);
+  const [confirmRestoreId, setConfirmRestoreId] = useState(null);
+  const [onlineUsers, setOnlineUsers] = useState([]);
+  const [remoteCursors, setRemoteCursors] = useState({});
+  const [, setViewportKey] = useState('');
   const [viewport, setViewport] = useState(() => ({
     width: window.innerWidth,
     height: window.innerHeight,
@@ -730,10 +813,8 @@ function WhiteboardInterface({
   const isMobileSheetOpen = isMobile && isCollaborationOpen;
 
   const isApplyingRemoteRef = useRef(false);
-  const isApplyingHistoryRef = useRef(false);
   const hostSessionSyncRef = useRef(false);
   const pendingShapeRef = useRef(null);
-  const remoteVersionRef = useRef(null);
   const panRef = useRef({
     isDragging: false,
     lastX: 0,
@@ -742,8 +823,17 @@ function WhiteboardInterface({
     prevDrawingMode: false,
   });
 
+  // Undo/redo only touch this person's own changes:
+  // each entry is { changes: [{ id, before, after }] } with serialized objects.
   const undoStackRef = useRef([]);
   const redoStackRef = useRef([]);
+  // What we believe is stored in Firestore for each object id.
+  const syncedRef = useRef(new Map());
+  const flushTimerRef = useRef(null);
+  const remoteQueueRef = useRef(Promise.resolve());
+  const lastChangeAtRef = useRef(0);
+  const lastVersionAtRef = useRef(Date.now());
+  const migrationCheckedRef = useRef(false);
 
   const clampToolbarPosition = (position) => {
     const toolbarWidth = toolbarRef.current?.offsetWidth || Math.min(viewport.width - 24, 620);
@@ -789,51 +879,190 @@ function WhiteboardInterface({
     showNotification('The host has locked this board. You can look around, but not edit.');
   };
 
-  const serializeSnapshot = () =>
-    JSON.stringify({
-      canvasData: fCanvas?.toJSON(['id']) || { objects: [], version: '5.3.0' },
-      backgroundColor,
-    });
+  const objectsCol = useMemo(
+    () => collection(db, 'artifacts', appId, 'public', 'data', 'rooms', roomId, 'objects'),
+    [roomId],
+  );
+  const versionsCol = useMemo(
+    () => collection(db, 'artifacts', appId, 'public', 'data', 'rooms', roomId, 'versions'),
+    [roomId],
+  );
 
-  const applySnapshot = (snapshotString) => {
-    if (!fCanvas || !window.fabric || !snapshotString) return;
-    const parsed = JSON.parse(snapshotString);
-    const nextCanvasData = parsed.canvasData || { objects: [], version: '5.3.0' };
-    const nextBackground = parsed.backgroundColor || DEFAULT_BACKGROUND;
+  const findObjectById = (id) => fCanvas?.getObjects().find((obj) => obj.id === id);
 
-    isApplyingRemoteRef.current = true;
-    fCanvas.loadFromJSON(nextCanvasData, () => {
-      setBackgroundColor(nextBackground);
-      fCanvas.backgroundColor = nextBackground;
-      applyObjectInteractivity();
-      fCanvas.renderAll();
-      isApplyingRemoteRef.current = false;
-    });
+  // Same format canvas.toJSON() produces for a single object.
+  const serializeObject = (obj) => {
+    const previous = obj.includeDefaultValues;
+    obj.includeDefaultValues = fCanvas.includeDefaultValues;
+    const json = JSON.stringify(obj.toObject(['id', 'z']));
+    obj.includeDefaultValues = previous;
+    return json;
   };
 
-  const pushHistory = () => {
-    if (!fCanvas) return;
-    const snapshot = serializeSnapshot();
-    const undo = undoStackRef.current;
-    if (undo[undo.length - 1] === snapshot) return;
-    undo.push(snapshot);
-    if (undo.length > 80) undo.shift();
-    redoStackRef.current = [];
+  // Serialized objects keyed by id. toJSON() bakes in any multi-selection
+  // transform, so moved groups serialize with their real positions.
+  const getLocalObjectMap = () => {
+    const map = new Map();
+    if (!fCanvas) return map;
+    for (const obj of fCanvas.toJSON(['id', 'z']).objects || []) {
+      if (obj.id) map.set(obj.id, JSON.stringify(obj));
+    }
+    return map;
   };
 
-  const syncRoomCanvas = async () => {
-    if (!fCanvas || !db || isApplyingRemoteRef.current || isLockedRef.current) return;
-    const payload = JSON.stringify(fCanvas.toJSON(['id']));
+  // Put one object (serialized) on the canvas, replacing any copy with the
+  // same id, or remove it when `serialized` is null. Runs without triggering
+  // our own change tracking.
+  const applyObjectLocally = (id, serialized) =>
+    new Promise((resolve) => {
+      if (!fCanvas || !window.fabric) return resolve();
+      const existing = findObjectById(id);
 
-    await updateDoc(roomRef, {
-      canvasData: payload,
-      canvasSettings: {
-        backgroundColor,
-      },
-      lastUpdatedAt: Date.now(),
-      lastUpdatedByClient: clientIdRef.current,
-      lastUpdatedByUser: user.uid,
+      if (!serialized) {
+        if (existing) {
+          isApplyingRemoteRef.current = true;
+          if (fCanvas.getActiveObjects().includes(existing)) fCanvas.discardActiveObject();
+          fCanvas.remove(existing);
+          isApplyingRemoteRef.current = false;
+          fCanvas.requestRenderAll();
+        }
+        return resolve();
+      }
+
+      // Don't yank a text box out from under someone who is typing in it.
+      if (existing?.isEditing) return resolve();
+
+      window.fabric.util.enlivenObjects([JSON.parse(serialized)], ([obj]) => {
+        if (!obj) return resolve();
+        isApplyingRemoteRef.current = true;
+        const current = findObjectById(id);
+        if (current) {
+          if (fCanvas.getActiveObjects().includes(current)) fCanvas.discardActiveObject();
+          fCanvas.remove(current);
+        }
+        const objects = fCanvas.getObjects();
+        let index = objects.findIndex((other) => (other.z || 0) > (obj.z || 0));
+        if (index < 0) index = objects.length;
+        fCanvas.insertAt(obj, index);
+        const selectable = !isLockedRef.current && activeToolRef.current === TOOL.SELECT;
+        obj.selectable = selectable;
+        obj.evented = !isLockedRef.current;
+        isApplyingRemoteRef.current = false;
+        fCanvas.requestRenderAll();
+        resolve(serializeObject(obj));
+      });
     });
+
+  const queueLocalApply = (id, serialized) => {
+    remoteQueueRef.current = remoteQueueRef.current.then(() => applyObjectLocally(id, serialized));
+    return remoteQueueRef.current;
+  };
+
+  // Write whatever differs between the canvas and Firestore. Only changed
+  // objects are written, so people editing different items never clash.
+  const flushChanges = async ({ recordHistory = true } = {}) => {
+    window.clearTimeout(flushTimerRef.current);
+    if (!fCanvas || !db || isLockedRef.current) return;
+
+    const local = getLocalObjectMap();
+    const synced = syncedRef.current;
+    const changes = [];
+    local.forEach((serialized, id) => {
+      if (synced.get(id) !== serialized) changes.push({ id, before: synced.get(id) || null, after: serialized });
+    });
+    synced.forEach((serialized, id) => {
+      if (!local.has(id)) changes.push({ id, before: serialized, after: null });
+    });
+    if (!changes.length) return;
+
+    const accepted = [];
+    let tooLarge = false;
+    for (const change of changes) {
+      if (change.after && change.after.length > MAX_OBJECT_CHARS) {
+        tooLarge = true;
+        continue;
+      }
+      accepted.push(change);
+      if (change.after) synced.set(change.id, change.after);
+      else synced.delete(change.id);
+    }
+    if (tooLarge) showNotification('That item is too large to save. Try a smaller image.');
+    if (!accepted.length) return;
+
+    if (recordHistory) {
+      undoStackRef.current.push({ changes: accepted });
+      if (undoStackRef.current.length > 100) undoStackRef.current.shift();
+      redoStackRef.current = [];
+    }
+    lastChangeAtRef.current = Date.now();
+
+    try {
+      // Small batches: the security rules look up the room once per write and
+      // Firestore allows 20 such lookups per batch.
+      for (let i = 0; i < accepted.length; i += 10) {
+        const batch = writeBatch(db);
+        for (const change of accepted.slice(i, i + 10)) {
+          const ref = doc(objectsCol, change.id);
+          if (change.after) {
+            batch.set(ref, {
+              data: change.after,
+              z: JSON.parse(change.after).z || 0,
+              updatedAt: Date.now(),
+              updatedBy: clientIdRef.current,
+            });
+          } else {
+            batch.delete(ref);
+          }
+        }
+        await batch.commit();
+      }
+    } catch (err) {
+      console.error('Saving changes failed', err);
+      // Forget what we assumed was saved so the next change retries it.
+      for (const change of accepted) {
+        if (change.before) synced.set(change.id, change.before);
+        else synced.delete(change.id);
+      }
+      showNotification(
+        err?.code === 'permission-denied'
+          ? 'Your change was not saved: the board is locked or the database rules need updating.'
+          : 'Some changes could not be saved. Check your connection.',
+      );
+    }
+  };
+
+  const scheduleFlush = () => {
+    window.clearTimeout(flushTimerRef.current);
+    flushTimerRef.current = window.setTimeout(() => {
+      void flushChanges();
+    }, 150);
+  };
+
+  // Older boards stored the whole canvas in one field. Move those items into
+  // per-item records the first time the board is opened.
+  const migrateLegacyCanvas = async () => {
+    if (migrationCheckedRef.current) return;
+    migrationCheckedRef.current = true;
+    try {
+      const snap = await getDoc(roomRef);
+      const legacy = snap.exists() ? snap.data().canvasData : null;
+      if (!legacy) return;
+      const parsed = typeof legacy === 'string' ? JSON.parse(legacy) : legacy;
+      const objects = parsed?.objects || [];
+      if (!objects.length) return;
+      await Promise.all(
+        objects.map((obj, index) => {
+          const withId = { ...obj, id: obj.id || `legacy-${index}`, z: obj.z ?? index };
+          return queueLocalApply(withId.id, JSON.stringify(withId));
+        }),
+      );
+      if (!isLockedRef.current) {
+        await flushChanges({ recordHistory: false });
+        await updateDoc(roomRef, { canvasData: null }).catch(() => {});
+      }
+    } catch (err) {
+      console.error('Migrating old board failed', err);
+    }
   };
 
   useEffect(() => {
@@ -940,26 +1169,46 @@ function WhiteboardInterface({
       const nextBg = data.canvasSettings?.backgroundColor || DEFAULT_BACKGROUND;
       setBackgroundColor(nextBg);
       fCanvas.backgroundColor = nextBg;
+      fCanvas.requestRenderAll();
+    });
 
-      const remoteVersion = `${data.lastUpdatedAt || 0}-${data.lastUpdatedByClient || 'none'}`;
-      const isNewVersion = remoteVersionRef.current !== remoteVersion;
-      remoteVersionRef.current = remoteVersion;
-
-      const fromOtherClient = data.lastUpdatedByClient !== clientIdRef.current;
-
-      if ((fCanvas.getObjects().length === 0 && data.canvasData) || (isNewVersion && fromOtherClient && data.canvasData)) {
-        isApplyingRemoteRef.current = true;
-        fCanvas.loadFromJSON(data.canvasData, () => {
-          fCanvas.backgroundColor = nextBg;
-          applyObjectInteractivity();
-          fCanvas.renderAll();
-          isApplyingRemoteRef.current = false;
-          if (undoStackRef.current.length === 0) {
-            undoStackRef.current.push(serializeSnapshot());
-          }
+    let firstObjectsSnapshot = true;
+    const unsubObjects = onSnapshot(objectsCol, (snap) => {
+      for (const change of snap.docChanges()) {
+        if (change.doc.metadata.hasPendingWrites) continue;
+        const id = change.doc.id;
+        if (change.type === 'removed') {
+          if (!syncedRef.current.has(id)) continue;
+          syncedRef.current.delete(id);
+          lastChangeAtRef.current = Date.now();
+          void queueLocalApply(id, null);
+          continue;
+        }
+        const serialized = change.doc.data().data;
+        if (!serialized || syncedRef.current.get(id) === serialized) continue;
+        syncedRef.current.set(id, serialized);
+        if (!firstObjectsSnapshot) lastChangeAtRef.current = Date.now();
+        // Store this browser's own serialization so formatting differences
+        // between browsers never look like a change worth re-saving.
+        void queueLocalApply(id, serialized).then((normalized) => {
+          if (normalized && syncedRef.current.get(id) === serialized) syncedRef.current.set(id, normalized);
         });
       }
 
+      if (firstObjectsSnapshot) {
+        firstObjectsSnapshot = false;
+        const isEmpty = snap.empty;
+        void remoteQueueRef.current.then(async () => {
+          if (isEmpty) await migrateLegacyCanvas();
+          if (!readyEmitted) {
+            readyEmitted = true;
+            onReady();
+          }
+        });
+      }
+    }, (err) => {
+      console.error('Loading board items failed', err);
+      showNotification('Could not load the board. The database rules may need updating.');
       if (!readyEmitted) {
         readyEmitted = true;
         onReady();
@@ -974,7 +1223,9 @@ function WhiteboardInterface({
 
     return () => {
       unsubRoom();
+      unsubObjects();
       unsubChat();
+      window.clearTimeout(flushTimerRef.current);
     };
   }, [db, fCanvas, onReady, roomId, roomRef, user]);
 
@@ -992,43 +1243,33 @@ function WhiteboardInterface({
     if (!fCanvas) return;
 
     const assignId = (obj) => {
-      if (!obj?.id) {
-        obj.id = `obj-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      }
-    };
-
-    const trackChange = async () => {
-      if (isApplyingRemoteRef.current || isApplyingHistoryRef.current) return;
-      pushHistory();
-      await syncRoomCanvas();
+      if (!obj.id) obj.id = newObjectId();
+      if (obj.z === undefined) obj.z = Date.now() + Math.random();
     };
 
     const onAdded = (e) => {
       if (!e.target || isApplyingRemoteRef.current) return;
       assignId(e.target);
-      void trackChange();
+      scheduleFlush();
     };
 
-    const onModified = () => {
-      void trackChange();
-    };
-
-    const onRemoved = () => {
-      void trackChange();
+    const onChanged = () => {
+      if (isApplyingRemoteRef.current) return;
+      scheduleFlush();
     };
 
     fCanvas.on('object:added', onAdded);
-    fCanvas.on('object:modified', onModified);
-    fCanvas.on('object:removed', onRemoved);
-    fCanvas.on('text:changed', onModified);
+    fCanvas.on('object:modified', onChanged);
+    fCanvas.on('object:removed', onChanged);
+    fCanvas.on('text:changed', onChanged);
 
     return () => {
       fCanvas.off('object:added', onAdded);
-      fCanvas.off('object:modified', onModified);
-      fCanvas.off('object:removed', onRemoved);
-      fCanvas.off('text:changed', onModified);
+      fCanvas.off('object:modified', onChanged);
+      fCanvas.off('object:removed', onChanged);
+      fCanvas.off('text:changed', onChanged);
     };
-  }, [fCanvas, backgroundColor]);
+  }, [fCanvas, objectsCol]);
 
   // Zoom/pan gestures: pinch + two-finger drag on touch screens,
   // Ctrl/Cmd + wheel (or trackpad pinch) to zoom and wheel to pan on desktop.
@@ -1195,7 +1436,6 @@ function WhiteboardInterface({
       if (activeTool === TOOL.ERASER && opt.target) {
         fCanvas.remove(opt.target);
         fCanvas.renderAll();
-        await syncRoomCanvas();
         return;
       }
 
@@ -1308,33 +1548,32 @@ function WhiteboardInterface({
     };
   }, [activeTool, fCanvas, isBoardLockedForMe, isSpacePressed, strokeColor, strokeWidth]);
 
+  const applyHistoryEntry = async (entry, direction) => {
+    // Apply local edits in progress first so they aren't mixed into this step.
+    await flushChanges();
+    await Promise.all(
+      entry.changes.map((change) => queueLocalApply(change.id, direction === 'undo' ? change.before : change.after)),
+    );
+    await flushChanges({ recordHistory: false });
+  };
+
   const handleUndo = async () => {
     if (!fCanvas) return;
     if (isBoardLockedForMe) return notifyBoardLocked();
-    if (undoStackRef.current.length <= 1) return;
-
-    const current = undoStackRef.current.pop();
-    redoStackRef.current.push(current);
-    const previous = undoStackRef.current[undoStackRef.current.length - 1];
-
-    isApplyingHistoryRef.current = true;
-    applySnapshot(previous);
-    isApplyingHistoryRef.current = false;
-    await syncRoomCanvas();
+    await flushChanges();
+    const entry = undoStackRef.current.pop();
+    if (!entry) return;
+    redoStackRef.current.push(entry);
+    await applyHistoryEntry(entry, 'undo');
   };
 
   const handleRedo = async () => {
     if (!fCanvas) return;
     if (isBoardLockedForMe) return notifyBoardLocked();
-    if (!redoStackRef.current.length) return;
-
-    const next = redoStackRef.current.pop();
-    undoStackRef.current.push(next);
-
-    isApplyingHistoryRef.current = true;
-    applySnapshot(next);
-    isApplyingHistoryRef.current = false;
-    await syncRoomCanvas();
+    const entry = redoStackRef.current.pop();
+    if (!entry) return;
+    undoStackRef.current.push(entry);
+    await applyHistoryEntry(entry, 'redo');
   };
 
   const setZoomLevel = (nextZoom) => {
@@ -1354,27 +1593,28 @@ function WhiteboardInterface({
 
   const handleUploadImage = () => imageInputRef.current?.click();
 
-  const onImagePicked = (e) => {
+  const onImagePicked = async (e) => {
     if (!fCanvas || !window.fabric) return;
     const file = e.target.files?.[0];
+    e.target.value = '';
     if (!file) return;
+    setActiveTool(TOOL.SELECT);
 
-    const reader = new FileReader();
-    reader.onload = () => {
-      window.fabric.Image.fromURL(reader.result, (img) => {
+    try {
+      const dataUrl = await compressImageFile(file);
+      window.fabric.Image.fromURL(dataUrl, (img) => {
         const maxWidth = Math.min(420, fCanvas.getWidth() * 0.7);
-        if (img.width > maxWidth) {
-          img.scale(maxWidth / img.width);
-        }
-        img.set({ left: 140, top: 140 });
+        if (img.width > maxWidth) img.scale(maxWidth / img.width);
+        const center = fCanvas.getVpCenter();
+        img.set({ left: center.x - img.getScaledWidth() / 2, top: center.y - img.getScaledHeight() / 2 });
         fCanvas.add(img);
         fCanvas.setActiveObject(img);
+        fCanvas.requestRenderAll();
       });
-    };
-    reader.readAsDataURL(file);
-
-    e.target.value = '';
-    setActiveTool(TOOL.SELECT);
+    } catch (err) {
+      console.error('Image upload failed', err);
+      showNotification(err?.message === 'too-large' ? 'That image is too large. Try a smaller one.' : 'Could not read that image.');
+    }
   };
 
   const changeBackgroundColor = async (color) => {
@@ -1382,8 +1622,12 @@ function WhiteboardInterface({
     setBackgroundColor(color);
     fCanvas.backgroundColor = color;
     fCanvas.renderAll();
-    pushHistory();
-    await syncRoomCanvas();
+    try {
+      await updateDoc(roomRef, { canvasSettings: { backgroundColor: color } });
+    } catch (err) {
+      console.error('Saving background failed', err);
+      showNotification('Could not save the background colour.');
+    }
   };
 
   const handleCopyRoomId = async () => {
@@ -1475,6 +1719,199 @@ function WhiteboardInterface({
     }
   };
 
+  // ---------- Version history ----------
+  const saveVersion = async ({ auto = false, label = '' } = {}) => {
+    if (!fCanvas || !db) return false;
+    if (isLockedRef.current) {
+      if (!auto) notifyBoardLocked();
+      return false;
+    }
+    await flushChanges();
+    const objects = [...getLocalObjectMap().values()].map((serialized) => JSON.parse(serialized));
+    const payload = JSON.stringify(objects);
+    if (payload.length > MAX_OBJECT_CHARS) {
+      if (!auto) showNotification('This board is too large (big images) to save as a version.');
+      return false;
+    }
+    if (!auto) setIsSavingVersion(true);
+    try {
+      await addDoc(versionsCol, {
+        createdAt: Date.now(),
+        createdBy: username || 'Guest',
+        createdByUid: user.uid,
+        label: label || (auto ? 'Auto-save' : 'Saved version'),
+        auto,
+        itemCount: objects.length,
+        backgroundColor,
+        objects: payload,
+      });
+      lastVersionAtRef.current = Date.now();
+      if (!auto) showNotification('Version saved.');
+      return true;
+    } catch (err) {
+      console.error('Saving version failed', err);
+      if (!auto) showNotification('Could not save the version.');
+      return false;
+    } finally {
+      if (!auto) setIsSavingVersion(false);
+    }
+  };
+
+  const restoreVersion = async (version) => {
+    setConfirmRestoreId(null);
+    if (!fCanvas) return;
+    if (isBoardLockedForMe) return notifyBoardLocked();
+    // Keep a safety copy of the current board first.
+    await saveVersion({ auto: true, label: 'Before restore' });
+
+    const target = new Map();
+    for (const obj of JSON.parse(version.objects || '[]')) {
+      if (obj.id) target.set(obj.id, JSON.stringify(obj));
+    }
+    const current = getLocalObjectMap();
+    const applies = [];
+    current.forEach((_, id) => {
+      if (!target.has(id)) applies.push(queueLocalApply(id, null));
+    });
+    target.forEach((serialized, id) => {
+      if (current.get(id) !== serialized) applies.push(queueLocalApply(id, serialized));
+    });
+    await Promise.all(applies);
+    await flushChanges(); // recorded, so Undo can reverse a restore
+    if (version.backgroundColor && version.backgroundColor !== backgroundColor) {
+      await changeBackgroundColor(version.backgroundColor);
+    }
+    showNotification('Version restored.');
+  };
+
+  useEffect(() => {
+    if (!db || activePanel !== 'history' || !isCollaborationOpen) return undefined;
+    const versionsQuery = query(versionsCol, orderBy('createdAt', 'desc'), limit(25));
+    return onSnapshot(
+      versionsQuery,
+      (snap) => setVersions(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
+      (err) => {
+        console.error('Loading versions failed', err);
+        showNotification('Could not load version history. The database rules may need updating.');
+      },
+    );
+  }, [activePanel, isCollaborationOpen, versionsCol]);
+
+  // The host's browser saves an automatic version every 10 minutes while the
+  // board is being changed.
+  const saveVersionRef = useRef(saveVersion);
+  saveVersionRef.current = saveVersion;
+  useEffect(() => {
+    if (!isCurrentHost) return undefined;
+    const timer = window.setInterval(() => {
+      const now = Date.now();
+      if (lastChangeAtRef.current > lastVersionAtRef.current && now - lastVersionAtRef.current >= AUTO_VERSION_INTERVAL_MS) {
+        void saveVersionRef.current({ auto: true });
+      }
+    }, 60 * 1000);
+    return () => window.clearInterval(timer);
+  }, [isCurrentHost]);
+
+  // ---------- Live presence and cursors (Firebase Realtime Database) ----------
+  const myColor = colorFor(clientIdRef.current);
+  useEffect(() => {
+    if (!rtdb || !user) return undefined;
+    const base = `rooms/${appId}/${roomId}`;
+    const presenceRef = rtdbRef(rtdb, `${base}/presence/${clientIdRef.current}`);
+    const cursorRef = rtdbRef(rtdb, `${base}/cursors/${clientIdRef.current}`);
+
+    rtdbSet(presenceRef, { name: username || 'Guest', uid: user.uid, color: myColor, joinedAt: Date.now() }).catch((err) =>
+      console.error('Presence unavailable', err),
+    );
+    onDisconnect(presenceRef).remove().catch(() => {});
+    onDisconnect(cursorRef).remove().catch(() => {});
+
+    const unsubPresence = onValue(
+      rtdbRef(rtdb, `${base}/presence`),
+      (snap) => {
+        const value = snap.val() || {};
+        setOnlineUsers(Object.entries(value).map(([clientId, info]) => ({ clientId, ...info })));
+      },
+      (err) => console.error('Presence listener failed', err),
+    );
+    const unsubCursors = onValue(
+      rtdbRef(rtdb, `${base}/cursors`),
+      (snap) => {
+        const value = { ...(snap.val() || {}) };
+        delete value[clientIdRef.current];
+        setRemoteCursors(value);
+      },
+      (err) => console.error('Cursor listener failed', err),
+    );
+
+    return () => {
+      unsubPresence();
+      unsubCursors();
+      rtdbRemove(presenceRef).catch(() => {});
+      rtdbRemove(cursorRef).catch(() => {});
+    };
+  }, [roomId, user, username, myColor]);
+
+  // Send this person's pointer position (throttled) while they move over the board.
+  useEffect(() => {
+    if (!rtdb || !fCanvas || !user) return undefined;
+    const cursorRef = rtdbRef(rtdb, `rooms/${appId}/${roomId}/cursors/${clientIdRef.current}`);
+    let lastSent = 0;
+    let pending = null;
+    let timer = null;
+
+    const send = () => {
+      timer = null;
+      if (!pending) return;
+      lastSent = Date.now();
+      rtdbSet(cursorRef, pending).catch(() => {});
+      pending = null;
+    };
+
+    const onMove = (opt) => {
+      const point = fCanvas.getPointer(opt.e);
+      pending = { name: username || 'Guest', color: myColor, x: Math.round(point.x), y: Math.round(point.y), t: Date.now() };
+      const wait = CURSOR_SEND_INTERVAL_MS - (Date.now() - lastSent);
+      if (wait <= 0) send();
+      else if (!timer) timer = window.setTimeout(send, wait);
+    };
+    const onOut = (opt) => {
+      if (opt?.target) return; // left a shape, not the board
+      window.clearTimeout(timer);
+      timer = null;
+      pending = null;
+      rtdbRemove(cursorRef).catch(() => {});
+    };
+
+    fCanvas.on('mouse:move', onMove);
+    fCanvas.on('mouse:out', onOut);
+    return () => {
+      fCanvas.off('mouse:move', onMove);
+      fCanvas.off('mouse:out', onOut);
+      window.clearTimeout(timer);
+    };
+  }, [fCanvas, roomId, user, username, myColor]);
+
+  // Re-render cursor labels when the board is panned or zoomed.
+  useEffect(() => {
+    if (!fCanvas) return undefined;
+    let last = '';
+    const onRender = () => {
+      const key = fCanvas.viewportTransform.join(',');
+      if (key !== last) {
+        last = key;
+        setViewportKey(key);
+      }
+    };
+    fCanvas.on('after:render', onRender);
+    return () => fCanvas.off('after:render', onRender);
+  }, [fCanvas]);
+
+  const visibleCursors = Object.entries(remoteCursors).filter(
+    ([, cursor]) => cursor && Number.isFinite(cursor.x) && Date.now() - (cursor.t || 0) < 60 * 1000,
+  );
+  const hasLivePresence = Boolean(rtdb) && onlineUsers.length > 0;
+
   const toggleLock = async () => {
     if (!isCurrentHost) return;
     await updateDoc(roomRef, { isLocked: !roomData.isLocked });
@@ -1520,6 +1957,33 @@ function WhiteboardInterface({
         <canvas ref={canvasRef} />
       </main>
 
+      {fCanvas && visibleCursors.length > 0 && (
+        <div className="pointer-events-none absolute inset-0 z-[45] overflow-hidden">
+          {visibleCursors.map(([clientId, cursor]) => {
+            const vpt = fCanvas.viewportTransform;
+            const left = cursor.x * vpt[0] + vpt[4];
+            const top = cursor.y * vpt[3] + vpt[5];
+            return (
+              <div
+                key={clientId}
+                className="absolute transition-transform duration-75 ease-linear"
+                style={{ transform: `translate(${left}px, ${top}px)` }}
+              >
+                <svg width="18" height="18" viewBox="0 0 18 18" className="drop-shadow">
+                  <path d="M2 2 L16 8 L9 10 L7 16 Z" fill={cursor.color || '#3b82f6'} stroke="white" strokeWidth="1.2" />
+                </svg>
+                <span
+                  className="ml-3 -mt-1 inline-block whitespace-nowrap rounded-md px-1.5 py-0.5 text-[11px] font-semibold text-white shadow"
+                  style={{ backgroundColor: cursor.color || '#3b82f6' }}
+                >
+                  {cursor.name || 'Guest'}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
       <div className="absolute top-3 left-3 right-3 sm:left-6 sm:right-auto z-50 rounded-2xl border border-slate-200 bg-white/90 dark:bg-slate-900/90 dark:border-slate-700 backdrop-blur px-2 sm:px-3 py-2 flex items-center gap-1 sm:gap-2 shadow-md">
         <button onClick={onExit} className="h-9 w-9 shrink-0 grid place-items-center rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800" title="Exit board" aria-label="Exit board">
           <LogOut size={16} />
@@ -1527,7 +1991,7 @@ function WhiteboardInterface({
         <div className="h-6 w-px shrink-0 bg-slate-200 dark:bg-slate-700" />
         <div className="min-w-0 flex-1 sm:flex-none px-1">
           <p className="text-xs font-semibold whitespace-nowrap truncate">Room {roomId}</p>
-          <p className="text-[11px] whitespace-nowrap text-slate-500 dark:text-slate-400">{roomData?.participants?.length || 1} joined</p>
+          <p className="text-[11px] whitespace-nowrap text-slate-500 dark:text-slate-400">{hasLivePresence ? `${onlineUsers.length} online` : `${roomData?.participants?.length || 1} joined`}</p>
         </div>
         <button onClick={handleCopyRoomId} className="h-9 w-9 shrink-0 grid place-items-center rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800" title="Copy room ID" aria-label="Copy room ID">
           <Copy size={15} />
@@ -1812,8 +2276,17 @@ function WhiteboardInterface({
                   onClick={() => setActivePanel('ai')}
                   className={`h-8 w-8 rounded-lg grid place-items-center ${activePanel === 'ai' ? 'bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900' : 'hover:bg-slate-100 dark:hover:bg-slate-800'}`}
                   title="AI summary"
+                  aria-label="AI summary"
                 >
                   <Sparkles size={14} />
+                </button>
+                <button
+                  onClick={() => setActivePanel('history')}
+                  className={`h-8 w-8 rounded-lg grid place-items-center ${activePanel === 'history' ? 'bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900' : 'hover:bg-slate-100 dark:hover:bg-slate-800'}`}
+                  title="Version history"
+                  aria-label="Version history"
+                >
+                  <History size={14} />
                 </button>
                 <button
                   onClick={() => setIsCollaborationOpen(false)}
@@ -1865,11 +2338,80 @@ function WhiteboardInterface({
 
             {activePanel === 'users' && (
               <div className="p-4 space-y-2 overflow-y-auto">
-                <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">Participants</p>
+                {hasLivePresence && (
+                  <>
+                    <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">Online now</p>
+                    {onlineUsers.map((p) => (
+                      <div key={p.clientId} className="flex items-center gap-2 rounded-xl border border-slate-200 dark:border-slate-700 px-3 py-2 bg-white/70 dark:bg-slate-950/50">
+                        <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: p.color || '#22c55e' }} />
+                        <p className="text-sm font-medium truncate">
+                          {p.name}
+                          {p.clientId === clientIdRef.current ? ' (You)' : ''}
+                        </p>
+                      </div>
+                    ))}
+                    <div className="h-2" />
+                  </>
+                )}
+                <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">{hasLivePresence ? 'Everyone who joined' : 'Participants'}</p>
                 {(roomData?.participants || []).map((p, idx) => (
                   <div key={`${p.uid}-${idx}`} className="rounded-xl border border-slate-200 dark:border-slate-700 px-3 py-2 bg-white/70 dark:bg-slate-950/50">
                     <p className="text-sm font-medium">{p.name}{p.uid === user.uid ? ' (You)' : ''}</p>
                     <p className="text-[11px] text-slate-500">{p.uid === roomData?.hostId ? 'Host' : 'Collaborator'}</p>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {activePanel === 'history' && (
+              <div className="flex-1 overflow-y-auto p-4 space-y-3">
+                <button
+                  onClick={() => void saveVersion()}
+                  disabled={isSavingVersion}
+                  className="w-full h-10 rounded-xl bg-slate-900 text-white text-sm font-semibold disabled:opacity-60 dark:bg-slate-100 dark:text-slate-900"
+                >
+                  {isSavingVersion ? 'Saving...' : 'Save current version'}
+                </button>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                  The host's browser also saves a version automatically every 10 minutes while the board changes.
+                </p>
+                {versions.length === 0 && (
+                  <p className="text-sm text-slate-500 dark:text-slate-400">No versions yet.</p>
+                )}
+                {versions.map((version) => (
+                  <div key={version.id} className="rounded-xl border border-slate-200 dark:border-slate-700 px-3 py-2 bg-white/70 dark:bg-slate-950/50">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium truncate">{version.label || 'Saved version'}</p>
+                        <p className="text-[11px] text-slate-500">
+                          {timeAgo(version.createdAt)} · {version.createdBy} · {version.itemCount ?? '?'} items
+                        </p>
+                      </div>
+                      {confirmRestoreId !== version.id && (
+                        <button
+                          onClick={() => (isBoardLockedForMe ? notifyBoardLocked() : setConfirmRestoreId(version.id))}
+                          className="shrink-0 h-8 rounded-lg border border-slate-300 dark:border-slate-600 px-2 text-xs hover:bg-slate-100 dark:hover:bg-slate-800"
+                        >
+                          Restore
+                        </button>
+                      )}
+                    </div>
+                    {confirmRestoreId === version.id && (
+                      <div className="mt-2 rounded-lg bg-amber-50 p-2 text-xs text-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
+                        <p>Replace the board for everyone with this version? A copy of the current board is saved first.</p>
+                        <div className="mt-2 flex gap-2">
+                          <button
+                            onClick={() => void restoreVersion(version)}
+                            className="h-8 rounded-lg bg-amber-600 px-3 font-semibold text-white"
+                          >
+                            Restore
+                          </button>
+                          <button onClick={() => setConfirmRestoreId(null)} className="h-8 rounded-lg px-3 hover:bg-amber-100 dark:hover:bg-amber-900/40">
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>

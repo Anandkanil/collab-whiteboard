@@ -112,6 +112,58 @@ const nextZ = () => {
   return Date.now() + zCounter / 1000;
 };
 
+const FABRIC_SOURCES = [
+  'https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.1/fabric.min.js',
+  'https://cdn.jsdelivr.net/npm/fabric@5.3.1/dist/fabric.min.js',
+  'https://unpkg.com/fabric@5.3.1/dist/fabric.min.js',
+];
+
+// Minimal formatting for AI summaries: **bold**, headings and bullet lists.
+const renderInline = (text) =>
+  text.split(/(\*\*[^*]+\*\*)/g).map((part, i) =>
+    part.startsWith('**') && part.endsWith('**') && part.length > 4 ? <strong key={i}>{part.slice(2, -2)}</strong> : part,
+  );
+
+// Splits text into paragraphs, headings and bullet lists.
+const parseSimpleMarkdown = (text) => {
+  const blocks = [];
+  for (const raw of String(text || '').split('\n')) {
+    const line = raw.trim();
+    if (!line) continue;
+    const bullet = line.match(/^(?:[-*•]|\d+[.)])\s+(.*)$/);
+    if (bullet) {
+      const last = blocks[blocks.length - 1];
+      if (last?.type === 'list') last.items.push(bullet[1]);
+      else blocks.push({ type: 'list', items: [bullet[1]] });
+      continue;
+    }
+    const heading = line.match(/^#{1,6}\s+(.*)$/);
+    blocks.push(heading ? { type: 'heading', text: heading[1] } : { type: 'paragraph', text: line });
+  }
+  return blocks;
+};
+
+const SimpleMarkdown = ({ text }) => (
+  <div className="space-y-2">
+    {parseSimpleMarkdown(text).map((block, i) => {
+      if (block.type === 'list') {
+        return (
+          <ul key={i} className="list-disc pl-4 space-y-1">
+            {block.items.map((item, j) => (
+              <li key={j}>{renderInline(item)}</li>
+            ))}
+          </ul>
+        );
+      }
+      return (
+        <p key={i} className={block.type === 'heading' ? 'font-semibold' : undefined}>
+          {renderInline(block.text)}
+        </p>
+      );
+    })}
+  </div>
+);
+
 const newObjectId = () => `obj-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
 // Shrinks an uploaded image until it fits in one Firestore document.
@@ -317,15 +369,48 @@ function App() {
     localStorage.setItem('cb-theme', darkMode ? 'dark' : 'light');
   }, [darkMode]);
 
-  useEffect(() => {
-    if (window.fabric) return;
+  const [fabricLoadFailed, setFabricLoadFailed] = useState(false);
+  const [fabricAttempt, setFabricAttempt] = useState(0);
 
-    const script = document.createElement('script');
-    script.src = 'https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.1/fabric.min.js';
-    script.async = true;
-    script.onload = () => setIsFabricLoaded(true);
-    document.head.appendChild(script);
-  }, []);
+  // Load the drawing library, falling back to other CDNs if one is down.
+  useEffect(() => {
+    if (window.fabric) return undefined;
+    let cancelled = false;
+
+    const tryLoad = (index) => {
+      if (cancelled) return;
+      if (index >= FABRIC_SOURCES.length) {
+        setFabricLoadFailed(true);
+        return;
+      }
+      const script = document.createElement('script');
+      script.src = FABRIC_SOURCES[index];
+      script.async = true;
+      const timer = window.setTimeout(() => {
+        script.onload = null;
+        script.onerror = null;
+        script.remove();
+        tryLoad(index + 1);
+      }, 15000);
+      script.onload = () => {
+        window.clearTimeout(timer);
+        if (window.fabric) setIsFabricLoaded(true);
+        else tryLoad(index + 1);
+      };
+      script.onerror = () => {
+        window.clearTimeout(timer);
+        script.remove();
+        tryLoad(index + 1);
+      };
+      document.head.appendChild(script);
+    };
+
+    setFabricLoadFailed(false);
+    tryLoad(0);
+    return () => {
+      cancelled = true;
+    };
+  }, [fabricAttempt]);
 
   useEffect(() => {
     if (!auth) return;
@@ -417,6 +502,25 @@ function App() {
     setIsBoardLoading(true);
     setView('board');
   };
+
+  if (!isFabricLoaded && fabricLoadFailed) {
+    return (
+      <div className="min-h-screen grid place-items-center bg-slate-100 dark:bg-slate-950 p-6">
+        <div className="max-w-md w-full rounded-3xl p-8 border bg-white border-slate-200 shadow-xl text-center dark:bg-slate-900 dark:border-slate-700">
+          <h1 className="text-xl font-bold text-slate-900 dark:text-slate-100">Couldn't load the whiteboard</h1>
+          <p className="mt-3 text-sm text-slate-600 dark:text-slate-300">
+            The drawing engine didn't download. Check your internet connection and try again.
+          </p>
+          <button
+            onClick={() => setFabricAttempt((n) => n + 1)}
+            className="mt-6 h-11 px-6 rounded-xl bg-slate-900 text-white font-semibold dark:bg-slate-100 dark:text-slate-900"
+          >
+            Try again
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   if (!isFabricLoaded) {
     return (
@@ -2440,7 +2544,7 @@ function WhiteboardInterface({
                 </button>
                 {aiSummary && (
                   <div className="mt-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white/70 dark:bg-slate-950/70 p-3 text-xs leading-relaxed">
-                    {aiSummary}
+                    <SimpleMarkdown text={aiSummary} />
                   </div>
                 )}
               </div>

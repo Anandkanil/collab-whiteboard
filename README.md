@@ -6,8 +6,12 @@ A real-time collaborative whiteboard built with React and Firebase. Create a roo
 
 ## Screenshots
 
-![Home page](./screenshots/whiteboard.png)
-![Whiteboard](./screenshots/whiteboard2.png)
+![Home page](./screenshots/home.png)
+![Whiteboard](./screenshots/board.png)
+
+<p align="center">
+  <img src="./screenshots/board-mobile.png" alt="CollabBoard on a phone" width="260">
+</p>
 
 ## Features
 
@@ -19,17 +23,18 @@ A real-time collaborative whiteboard built with React and Firebase. Create a roo
 - Version history: save versions, restore earlier boards (the host auto-saves every 10 minutes)
 - Live cursors and a live "online" list (needs Firebase Realtime Database)
 - Live chat and participant list
-- Host can lock the board so collaborators can view but not edit
-- AI board summary (Google Gemini, called through a Netlify Function so the API key stays private)
+- Host can lock the board so collaborators can view but not edit; anyone who tries to draw on a locked board sees a short notice
+- AI board summary (Google Gemini, called through a Netlify Function so the API key stays private), shown as formatted headings and bullet points
 - Export the board as PNG or PDF
-- Light and dark mode, mobile-friendly layout
+- Light and dark mode
+- Layouts for phone, tablet and desktop: on phones the toolbar sits along the bottom and chat and participants open as a sheet
 
 
 ## Tech stack
 
-- React 19 + Vite
+- React 19 + Vite 8
 - Tailwind CSS, Framer Motion, Lucide icons
-- Fabric.js (canvas engine, loaded from CDN)
+- Fabric.js 5 (canvas engine, loaded from cdnjs with jsDelivr and unpkg as fallbacks)
 - Firebase Authentication (anonymous) + Cloud Firestore (rooms, board items, versions, chat)
 - Firebase Realtime Database (optional: live cursors and presence)
 - Netlify hosting + Netlify Functions (AI summary)
